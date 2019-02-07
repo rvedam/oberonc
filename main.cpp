@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include "lexer.h"
+#include "token_stream.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -15,7 +16,11 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    std::string line;
+    while(std::getline(ifs, line))
+    {
 
+    }
     ifs.close();
     return 0;
 }
