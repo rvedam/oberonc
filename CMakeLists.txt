@@ -12,13 +12,11 @@ message("LLVM Lib Directory: ${LLVM_LIBRARY_DIRS}")
 set(HEADERS
     lexer.h
     token.h
-    token_stream.h
     )
 
 set(SOURCES
     main.cpp
     token.cpp
-    token_stream.cpp
     )
 
 include_directories(${LLVM_INCLUDE_DIRS})
