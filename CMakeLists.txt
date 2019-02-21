@@ -10,13 +10,15 @@ message("LLVM Include Directory: ${LLVM_INCLUDE_DIRS}")
 message("LLVM Lib Directory: ${LLVM_LIBRARY_DIRS}")
 
 set(HEADERS
-    lexer.h
+    lexer_enums.h
     token.h
+    scanner.h
     )
 
 set(SOURCES
     main.cpp
-    token.cpp
+    token.t
+    scanner.cpp
     )
 
 include_directories(${LLVM_INCLUDE_DIRS})

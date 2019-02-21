@@ -5,7 +5,8 @@
 #ifndef OBERONC_TOKEN_H
 #define OBERONC_TOKEN_H
 
-#include "lexer.h"
+#include <string>
+#include "lexer_enums.h"
 
 /**
  * Lexer package contains various components required to compose a stream of tokens
@@ -21,16 +22,19 @@ template<typename T>
 class token
 {
 public:
-    token(TokenType type, T value);
-    virtual ~token();
+    token(TokenType type, T value, int line, int cpos);
+    virtual ~token() = default;
     TokenType type() const;
     T value() const;
+    int line_number() const {return m_lineno;}
+    int char_pos() const {return m_cpos;}
 private:
     TokenType m_type;
     T m_value;
+    int m_lineno;
+    int m_cpos;
 };
-
 }
 
-
+#include "token.t"
 #endif //OBERONC_TOKEN_H

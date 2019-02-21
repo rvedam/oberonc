@@ -8,4 +8,5 @@ END Do;
 
 BEGIN
     Do();
+
 END Test.

@@ -1,7 +1,7 @@
 #include <iostream>
 #include <fstream>
-#include "lexer.h"
-#include "token_stream.h"
+#include "lexer_enums.h"
+#include "scanner.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -9,18 +9,13 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     auto filename = argv[1];
-    std::ifstream ifs;
-    ifs.open(filename, std::ios::in);
-    if (!ifs.is_open()) {
-        std::cout << "Filename not open" << std::endl;
-        return -1;
+    lexer::scanner scanner;
+    scanner.read(filename);
+    auto tokens = scanner.tokens();
+    std::cout << "[";
+    for(auto token : tokens) {
+        std::cout << "(" << token.type() << ", " << token.value() << ")";
     }
-
-    std::string line;
-    while(std::getline(ifs, line))
-    {
-
-    }
-    ifs.close();
+    std::cout << "]" << std::endl;
     return 0;
 }

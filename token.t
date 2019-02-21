@@ -7,10 +7,14 @@
 namespace lexer
 {
     template<typename T>
-    token<T>::token(TokenType type, T value) : m_type(type), m_value(value) {}
+    token<T>::token(TokenType type, T value, int lineno, int cpos) :
+        m_type(type),
+        m_value(value),
+        m_lineno(lineno),
+        m_cpos(cpos)
+        {
 
-    template<typename T>
-    token<T>::~token() {}
+        }
 
     template<typename T>
     TokenType token<T>::type() const {return m_type;}
