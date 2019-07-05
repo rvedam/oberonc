@@ -17,10 +17,17 @@ namespace lexer
             token<std::string> tk(type, str, line, cpos);
             m_tokens.emplace_back(tk);
         };
-        auto lookupToken = [](std::string str) -> lexer::TokenType {
+        auto lookupKeywordToken = [](std::string str) -> lexer::TokenType {
             try {
                 return keywordLookup.at(str);
             } catch(std::out_of_range e) {
+                return lexer::UNKNOWN_TOKEN;
+            }
+        };
+        auto lookupOpToken = [](char tok) -> lexer::TokenType  {
+            try {
+                return opLookup.at(tok);
+            }catch (std::out_of_range e) {
                 return lexer::UNKNOWN_TOKEN;
             }
         };
@@ -45,7 +52,7 @@ namespace lexer
                     ++cpos;
                 }
                 token = tok.str();
-                auto ttype = lookupToken(tok.str());
+                auto ttype = lookupKeywordToken(tok.str());
                 if(ttype == lexer::UNKNOWN_TOKEN) {
                     if(tok.str().find('.') == std::string::npos && tok.str().find('*') == std::string::npos) {
                         addToken(lexer::IDENT, tok.str(), lineno, cpos);
@@ -75,32 +82,14 @@ namespace lexer
                 } else {
                     addToken(lexer::FLOAT, tok.str(), lineno, cpos);
                 }
-            } else if(ifs.peek() == ';') {
+            } else {
+                char ch;
                 ifs.get(ch);
-                tok << ch;
-                addToken(lexer::SEMICOLON, tok.str(), lineno, cpos);
-            } else if(ifs.peek() == ':') {
-                ifs.get(ch);
-                tok << ch;
-                addToken(lexer::COLON, tok.str(), lineno, cpos);
-            } else if(ifs.peek() == '\n') {
-                ifs.get(ch);
-                tok << ch;
-                addToken(lexer::NEWLINE, tok.str(), lineno, cpos);
-            } else if(ifs.peek() == '.') {
-                ifs.get(ch);
-                tok << ch;
-                addToken(lexer::PERIOD, tok.str(), lineno, cpos);
-                ++lineno;
-                cpos = 1;
-            } else if(ifs.peek() == '(') {
-                ifs.get(ch);
-                tok << ch;
-                addToken(lexer::LPAREN, tok.str(),lineno, cpos);
-            } else if(ifs.peek() == ')') {
-                ifs.get(ch);
-                tok << ch;
-                addToken(lexer::RPAREN, tok.str(),lineno, cpos);
+                auto tokenType = lookupOpToken(ch);
+                if(tokenType == lexer::UNKNOWN_TOKEN) {
+                    std::cout << fpath << ":" << lineno << ":" << cpos << ": unknown token found." << std::endl;
+                }
+                ++cpos;
             }
             token = tok.str();
             tok.clear();
@@ -116,5 +105,14 @@ namespace lexer
     std::vector<std::string> scanner::errors() const
     {
         return m_errors;
+    }
+
+    void scanner::printTokens() const
+    {
+        std::cout << "[";
+        for(auto tok : m_tokens) {
+            std::cout << "(" << tok.type() << ", " << tok.value() << ")";
+        }
+        std::cout << "]" << std::endl;
     }
 }

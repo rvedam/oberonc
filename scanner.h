@@ -19,6 +19,7 @@ namespace lexer
         void read(std::string fpath);
         std::vector<token<std::string>> tokens() const;
         std::vector<std::string> errors() const;
+        void printTokens() const;
     private:
         std::vector<token<std::string>> m_tokens;
         std::vector<std::string> m_errors;

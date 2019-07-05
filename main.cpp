@@ -11,11 +11,6 @@ int main(int argc, char* argv[]) {
     auto filename = argv[1];
     lexer::scanner scanner;
     scanner.read(filename);
-    auto tokens = scanner.tokens();
-    std::cout << "[";
-    for(auto token : tokens) {
-        std::cout << "(" << token.type() << ", " << token.value() << ")";
-    }
-    std::cout << "]" << std::endl;
+    scanner.printTokens();
     return 0;
 }

@@ -13,6 +13,7 @@ set(HEADERS
     lexer_enums.h
     token.h
     scanner.h
+    expr_ast.h
     )
 
 set(SOURCES

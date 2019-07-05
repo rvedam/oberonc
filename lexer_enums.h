@@ -20,14 +20,15 @@ namespace lexer
         WS,             /// whitespace
         LPAREN,         /// left parentheses
         RPAREN,         /// right parentheses
-        LBRACE,         /// left brace
-        RBRACE,         /// right brace
+        LBRACK,         /// left brace
+        RBRACK,         /// right brace
         IDENT,          /// for string identifiers (variables, functions, etc.)
         QUALIDENT,      /// for MODULE.function notation
         IDENTDEF,       /// For some kinds of procedural definitons
         SEMICOLON,      /// semi-colon
         COLON,          /// colon
-        PERIOD,
+        PERIOD,         /// period (useful for method definition)
+        QUOT,           /// quotation
         NEWLINE,
         // keywords
         ARRAY,
@@ -69,50 +70,57 @@ namespace lexer
         UNKNOWN_TOKEN
     };
 
-    const std::unordered_map<std::string, TokenType> keywordLookup({
-                                                                           {"(", LPAREN},
-                                                                           {")", RPAREN},
-                                                                           {"+", PLUS},
-                                                                           {"-", MINUS},
-                                                                           {"*", MULT},
-                                                                           {"/", DIV},
-                                                                           {".", PERIOD},
-                                                                           {"MOD", MOD},
-                                                                           {";", SEMICOLON},
-                                                                           {":", COLON},
-                                                                           {"ARRAY", ARRAY},
-                                                                           {"BY", BY},
-                                                                           {"CASE", CASE},
-                                                                           {"CONST", CONST},
-                                                                           {"DO", DO},
-                                                                           {"ELSE", ELSE},
-                                                                           {"ELSIF", ELSIF},
-                                                                           {"FALSE", FALSE},
-                                                                           {"FOR", FOR},
-                                                                           {"IF", IF},
-                                                                           {"IMPORT", IMPORT},
-                                                                           {"IN", IN},
-                                                                           {"IS", IS},
-                                                                           {"MODULE", MODULE},
-                                                                           {"NIL", NIL},
-                                                                           {"OF",OF},
-                                                                           {"OR",OR},
-                                                                           {"POINTER",POINTER},
-                                                                           {"PROCEDURE", PROCEDURE},
-                                                                           {"RECORD",RECORD},
-                                                                           {"REPEAT",REPEAT},
-                                                                           {"RETURN",RETURN},
-                                                                           {"THEN", THEN},
-                                                                           {"TO", TO},
-                                                                           {"TRUE", TRUE},
-                                                                           {"TYPE", TYPE},
-                                                                           {"UNTIL", UNTIL},
-                                                                           {"VAR", VAR},
-                                                                           {"WHILE", WHILE},
-                                                                           {"BEGIN", BEGIN},
-                                                                           {"END", END}
-                                                                   });
+    const std::unordered_map<char, TokenType> opLookup({
+        {'(', LPAREN},
+        {')', RPAREN},
+        {'+', PLUS},
+        {'-', MINUS},
+        {'*', MULT},
+        {'/', DIV},
+        {'.', PERIOD},
+        {';', SEMICOLON},
+        {':', COLON},
+        {'[', LBRACK},
+        {']', RBRACK},
+        {'\"', QUOT}
+    });
 
+    const std::unordered_map<std::string, TokenType> keywordLookup({
+       {"MOD", MOD},
+       {"ARRAY", ARRAY},
+       {"BY", BY},
+       {"CASE", CASE},
+       {"CONST", CONST},
+       {"DO", DO},
+       {"ELSE", ELSE},
+       {"ELSIF", ELSIF},
+       {"FALSE", FALSE},
+       {"FOR", FOR},
+       {"IF", IF},
+       {"IMPORT", IMPORT},
+       {"IN", IN},
+       {"IS", IS},
+       {"MODULE", MODULE},
+       {"NIL", NIL},
+       {"OF",OF},
+       {"OR",OR},
+       {"POINTER",POINTER},
+       {"PROCEDURE", PROCEDURE},
+       {"RECORD",RECORD},
+       {"REPEAT",REPEAT},
+       {"RETURN",RETURN},
+       {"THEN", THEN},
+       {"TO", TO},
+       {"TRUE", TRUE},
+       {"TYPE", TYPE},
+       {"UNTIL", UNTIL},
+       {"VAR", VAR},
+       {"WHILE", WHILE},
+       {"BEGIN", BEGIN},
+       {"END", END}
+    });
+
+    std::ostream operator<<(std::ostream& os, TokenType& tokenType);
 }
 
 #endif //OBERONC_LEXER_H
