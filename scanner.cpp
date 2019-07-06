@@ -2,6 +2,7 @@
 // Created by Ramnarayan Vedam on 2/9/19.
 //
 
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -111,7 +112,7 @@ namespace lexer
     {
         std::cout << "[";
         for(auto tok : m_tokens) {
-            std::cout << "(" << tok.type() << ", " << tok.value() << ")";
+            std::cout << "(" << lexer::tokenTypeLookup.at(tok.type()) << ", " << tok.value() << ")";
         }
         std::cout << "]" << std::endl;
     }
