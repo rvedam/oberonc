@@ -80,7 +80,7 @@ namespace lexer
                 if(tok.str().find('.') == std::string::npos) {
                     addToken(lexer::INTEGER, tok.str(), lineno, cpos);
                 } else {
-                    addToken(lexer::FLOAT, tok.str(), lineno, cpos);
+                    addToken(lexer::REAL, tok.str(), lineno, cpos);
                 }
             } else {
                 char ch;
@@ -111,7 +111,7 @@ namespace lexer
     {
         std::cout << "[";
         for(auto tok : m_tokens) {
-            std::cout << "(" << tok.type() << ", " << tok.value() << ")";
+            std::cout << "(" << tokenTypeToString(tok.type()) << ", " << tok.value() << ")";
         }
         std::cout << "]" << std::endl;
     }

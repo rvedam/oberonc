@@ -14,13 +14,16 @@ set(HEADERS
     token.h
     scanner.h
     expr_ast.h
-    )
+    integer_expr_ast.h
+    double_expr_ast.h)
 
 set(SOURCES
     main.cpp
     token.t
     scanner.cpp
-    )
+    integer_expr_ast.cpp
+    double_expr_ast.cpp
+    lexer_enums.cpp)
 
 include_directories(${LLVM_INCLUDE_DIRS})
 

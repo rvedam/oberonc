@@ -2,8 +2,7 @@
 // Created by vedam on 12/25/2018.
 //
 
-#ifndef OBERONC_TOKEN_H
-#define OBERONC_TOKEN_H
+#pragma once
 
 #include <string>
 #include "lexer_enums.h"
@@ -37,4 +36,4 @@ private:
 }
 
 #include "token.t"
-#endif //OBERONC_TOKEN_H
+

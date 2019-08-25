@@ -2,8 +2,7 @@
 // Created by Ramnarayan Vedam on 2/9/19.
 //
 
-#ifndef OBERONC_SCANNER_H
-#define OBERONC_SCANNER_H
+#pragma once
 
 #include <string>
 #include <vector>
@@ -25,6 +24,3 @@ namespace lexer
         std::vector<std::string> m_errors;
     };
 }
-
-
-#endif //OBERONC_SCANNER_H

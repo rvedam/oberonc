@@ -2,16 +2,13 @@
 // Created by Ramnarayan Vedam on 6/29/19.
 //
 
-#ifndef OBERONC_EXPRAST_H
-#define OBERONC_EXPRAST_H
+#pragma once
 
-namespace parser
+namespace oberon
 {
     class expr_ast
     {
     public:
-
+        virtual ~expr_ast(){}
     };
 }
-
-#endif //OBERONC_EXPRAST_H
