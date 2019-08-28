@@ -130,7 +130,7 @@ const std::unordered_map<std::string, TokenType> keywordLookup({
                                                                      {"END",       END}
                                                                  });
 
-const std::unordered_map<TokenType, std::string, TokenTypeHash> tokenTypeLookup({{WS, "WS"},
+const std::unordered_map<TokenType, std::string> tokenTypeLookup({{WS, "WS"},
                                                                                  {LPAREN, "LPAREN"},
                                                                                  {RPAREN, "RPAREN"},
                                                                                  {PLUS, "PLUS"},
@@ -178,7 +178,5 @@ const std::unordered_map<TokenType, std::string, TokenTypeHash> tokenTypeLookup(
                                                                                  {WHILE, "WHILE"},
                                                                                  {BEGIN, "BEGIN"},
                                                                                  {END, "END"}});
-} // namespace lexer
-
   std::string tokenTypeToString(TokenType type);
-}
+} // namespace lexer
