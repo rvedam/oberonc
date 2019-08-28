@@ -2,6 +2,7 @@
 // Created by Ramnarayan Vedam on 2/9/19.
 //
 
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <sstream>
