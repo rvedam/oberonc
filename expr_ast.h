@@ -6,9 +6,10 @@
 
 namespace oberon
 {
-    class expr_ast
-    {
-    public:
-        virtual ~expr_ast(){}
-    };
+  class expr_ast
+  {
+  public:
+    virtual ~expr_ast()
+    {}
+  };
 }

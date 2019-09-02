@@ -1,7 +1,6 @@
 #include <iostream>
-#include <fstream>
-#include "lexer_enums.h"
 #include "scanner.h"
+#include "LogReporter.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -9,7 +8,8 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     auto filename = argv[1];
-    lexer::scanner scanner;
+    utils::LogReporter reporter;
+    lexer::scanner scanner(&reporter);
     scanner.read(filename);
     scanner.printTokens();
     return 0;
