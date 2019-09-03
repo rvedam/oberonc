@@ -1,6 +1,7 @@
 #include <iostream>
 #include "scanner.h"
 #include "LogReporter.h"
+#include "parser.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -10,7 +11,7 @@ int main(int argc, char* argv[]) {
     auto filename = argv[1];
     utils::LogReporter reporter;
     lexer::scanner scanner(&reporter);
-    scanner.read(filename);
-    scanner.printTokens();
+    oberon::parser parser(&scanner, &reporter);
+    parser.parse(filename);
     return 0;
 }

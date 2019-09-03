@@ -13,19 +13,13 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="dc506c2b-39ba-4ce2-a3d3-b04d5368a316" name="Default Changelist" comment="">
+      <change afterPath="$PROJECT_DIR$/parser.cpp" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/parser.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/LogReporter.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/LogReporter.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/LogReporter.h" beforeDir="false" afterPath="$PROJECT_DIR$/LogReporter.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/comment_expr_ast.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/comment_expr_ast.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/comment_expr_ast.h" beforeDir="false" afterPath="$PROJECT_DIR$/comment_expr_ast.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/expr_ast.h" beforeDir="false" afterPath="$PROJECT_DIR$/expr_ast.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/main.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/module_expr_ast.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/module_expr_ast.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/module_expr_ast.h" beforeDir="false" afterPath="$PROJECT_DIR$/module_expr_ast.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/scanner.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/scanner.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/scanner.h" beforeDir="false" afterPath="$PROJECT_DIR$/scanner.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/test.mod" beforeDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -80,7 +74,7 @@
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
-    <configuration name="oberonc" type="CMakeRunConfiguration" factoryName="Application" PROGRAM_PARAMS="test.mod" WORKING_DIR="file://$PROJECT_DIR$" PASS_PARENT_ENVS_2="true" PROJECT_NAME="oberonc" TARGET_NAME="oberonc" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="oberonc" RUN_TARGET_NAME="oberonc">
+    <configuration name="oberonc" type="CMakeRunConfiguration" factoryName="Application" PROGRAM_PARAMS="example-programs/hello.mod" WORKING_DIR="file://$PROJECT_DIR$" PASS_PARENT_ENVS_2="true" PROJECT_NAME="oberonc" TARGET_NAME="oberonc" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="oberonc" RUN_TARGET_NAME="oberonc">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -115,7 +109,7 @@
       <workItem from="1565416883884" duration="658000" />
       <workItem from="1566017313204" duration="67000" />
       <workItem from="1566017518236" duration="10000" />
-      <workItem from="1566017709614" duration="10568000" />
+      <workItem from="1566017709614" duration="15320000" />
     </task>
     <servers />
   </component>
