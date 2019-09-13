@@ -12,7 +12,7 @@
 
 namespace lexer
 {
-  scanner::scanner(utils::LogReporter *log_reporter) : m_log(log_reporter), m_it(m_tokens.begin())
+  scanner::scanner(utils::LogReporter *log_reporter) : m_log(log_reporter)
   {}
 
   void scanner::read(std::string fpath)
@@ -139,9 +139,9 @@ namespace lexer
   void scanner::printTokens()
   {
     std::cout << "[";
-    for(; m_it != m_tokens.end(); ++m_it)
+    for(auto tok : m_tokens)
     {
-      std::cout << "(" << tokenTypeToString(m_it->type()) << ", " << m_it->value() << ")";
+      std::cout << "(" << tokenTypeToString(tok.type()) << ", " << tok.value() << ")";
     }
     std::cout << "]" << std::endl;
   }

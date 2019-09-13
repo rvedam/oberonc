@@ -8,4 +8,4 @@ END Do;
 
 BEGIN
     Do();
-END Test.
+END Hello.

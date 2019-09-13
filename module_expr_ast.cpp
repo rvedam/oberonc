@@ -14,11 +14,11 @@ namespace oberon
     return m_name;
   }
 
-  std::unordered_map<std::string, expr_ast*> module_expr_ast::module_members() const
+  std::vector<expr_ast*> module_expr_ast::members() const
   { return m_members; }
 
-  void module_expr_ast::add_member(std::string name, oberon::expr_ast *node)
+  void module_expr_ast::add(oberon::expr_ast* node)
   {
-    m_members[name] = node;
+    m_members.emplace_back(std::move(node));
   }
 }

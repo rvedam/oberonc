@@ -6,7 +6,7 @@
 #define OBERONC_MODULE_EXPR_AST_H
 
 #include <string>
-#include <unordered_map>
+#include <vector>
 #include "expr_ast.h"
 
 namespace oberon
@@ -33,18 +33,18 @@ namespace oberon
      * Members of the module
      * @return unordered_map representing module members
      */
-    std::unordered_map<std::string, expr_ast*> module_members() const;
+    std::vector<expr_ast*> members() const;
 
     /**
      * add new member into module
      * @param name name of the specific variable
      * @param node AST node representing the expression in code.
      */
-    void add_member(std::string name, expr_ast* node);
+    void add(expr_ast* node);
 
   private:
     std::string m_name;
-    std::unordered_map<std::string, expr_ast*> m_members;
+    std::vector<expr_ast*> m_members;
   };
 }
 

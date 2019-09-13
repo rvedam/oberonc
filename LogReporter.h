@@ -13,14 +13,41 @@ namespace utils
   class LogReporter
   {
   public:
+    /**
+     * default constructor
+     */
     LogReporter() = default;
 
+    /**
+     * default destructor
+     */
     ~LogReporter() = default;
 
+    /**
+     *
+     * @param fpath
+     * @param line_no
+     * @param char_pos
+     * @param error
+     */
     void report_lexer_error(std::string fpath, int line_no, int char_pos, std::string error);
 
+    /**
+     *
+     * @param fpath
+     * @param line_no
+     * @param char_pos
+     * @param error
+     */
     void report_parser_error(std::string fpath, int line_no, int char_pos, std::string error);
 
+    /**
+     *
+     * @param fpath
+     * @param line_no
+     * @param char_pos
+     * @param warning
+     */
     void report_parser_warning(std::string fpath, int line_no, int char_pos, std::string warning);
 
   private:

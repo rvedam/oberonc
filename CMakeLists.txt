@@ -19,7 +19,9 @@ set(HEADERS
     double_expr_ast.h
     module_expr_ast.h
     LogReporter.h
-    parser.h)
+    parser.h
+    string_expr_ast.h
+    )
 
 set(SOURCES
     main.cpp
@@ -31,7 +33,9 @@ set(SOURCES
     lexer_enums.cpp
     module_expr_ast.cpp
     LogReporter.cpp
-    parser.cpp)
+    parser.cpp
+    string_expr_ast.cpp
+    )
 
 include_directories(${LLVM_INCLUDE_DIRS})
 
