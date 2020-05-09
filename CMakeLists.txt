@@ -1,40 +1,38 @@
 cmake_minimum_required(VERSION 3.0)
 project(oberonc)
 
-set(CMAKE_CXX_STANDARD 14)
+# update to using C++17
+set(CMAKE_CXX_STANDARD 17)
+
+set(CMAKE_MODULE_PATH
+    /usr/local/lib/cmake/antlr4
+   )
 
 # find LLVM package
 find_package(LLVM)
 
+add_definitions(-DANTLR4CPP_STATIC)
+include(ExternalAntlr4Cpp)
+set(ANTLR_EXECUTABLE /usr/local/antlr-4.8-complete.jar)
+find_package(ANTLR REQUIRED)
+
+if(${ANTLR_FOUND})
+  message("ANTLR Executable Path: ${ANTLR_EXECUTABLE}")
+  message("ANTLR Include Directory: ${ANTLR4_INCLUDE_DIRS}")
+  message("ANTLR Shared Library Directory: ${ANTLR4_SHARED_LIBRARIES}")
+  message("ANTLR Static Library Directory: ${ANTLR4_STATIC_LIBRARIES}")
+endif()
+
 message("LLVM Include Directory: ${LLVM_INCLUDE_DIRS}")
 message("LLVM Lib Directory: ${LLVM_LIBRARY_DIRS}")
 
+antlr_target(Oberon oberon.g4)
+
 set(HEADERS
-    lexer_enums.h
-    token.h
-    scanner.h
-    expr_ast.h
-    integer_expr_ast.h
-    comment_expr_ast.h
-    double_expr_ast.h
-    module_expr_ast.h
-    LogReporter.h
-    parser.h
-    string_expr_ast.h
     )
 
 set(SOURCES
     main.cpp
-    token.t
-    scanner.cpp
-    integer_expr_ast.cpp
-    comment_expr_ast.cpp
-    double_expr_ast.cpp
-    lexer_enums.cpp
-    module_expr_ast.cpp
-    LogReporter.cpp
-    parser.cpp
-    string_expr_ast.cpp
     )
 
 include_directories(${LLVM_INCLUDE_DIRS})
