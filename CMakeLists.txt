@@ -16,6 +16,9 @@ include(ExternalAntlr4Cpp)
 set(ANTLR_EXECUTABLE /usr/local/antlr-4.8-complete.jar)
 find_package(ANTLR REQUIRED)
 
+antlr_target(OberonLexer OberonLexerRules.g4 LEXER PACKAGE oberoncpptest)
+antlr_target(OberonParser Oberon.g4 LEXER PACKAGE oberoncpptest)
+
 if(${ANTLR_FOUND})
   message("ANTLR Executable Path: ${ANTLR_EXECUTABLE}")
   message("ANTLR Include Directory: ${ANTLR4_INCLUDE_DIRS}")
