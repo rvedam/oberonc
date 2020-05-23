@@ -13,3 +13,4 @@ is currently located at (http://www.projectoberon.com) to LLVM
 ## Dependencies
 - LLVM
 - CMake
+- ANTLR4
