@@ -1,3 +1,3 @@
-grammer Oberon;
+grammar Oberon;
 
-import OberonLexerRules;  // importing our lexical symbols
+import OberonLexer;  // importing our lexical symbols
