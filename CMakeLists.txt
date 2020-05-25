@@ -15,23 +15,13 @@ add_definitions(-DANTLR4CPP_STATIC)
 set(ANTLR4_JAR_LOCATION /usr/local/antlr-4.8-complete.jar)
 find_package(antlr4-generator REQUIRED)
 find_package(antlr4-runtime REQUIRED)
-set(ANTLR4_CPP_GENERATED_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/antlr4_generated_src")
 
-antlr4_generate(oberon_lexer 
-    OberonLexer.g4 
-    LEXER 
+antlr4_generate(oberon_parser
+    ${CMAKE_CURRENT_SOURCE_DIR}/Oberon.g4 
+    BOTH
     FALSE
     TRUE
-    "oberon")
-
-message("ANTLR Lexer generated include dir: ${ANTLR4_INCLUDE_DIR_oberon_lexer}")
-
-antlr4_generate(oberon_parser 
-    Oberon.g4 
-    PARSER 
-    FALSE
-    TRUE
-    "oberon")
+    "oberon") 
 
 if(${ANTLR_FOUND})
   message("ANTLR Executable Path: ${ANTLR_EXECUTABLE}")
@@ -46,22 +36,29 @@ message("LLVM Lib Directory: ${LLVM_LIBRARY_DIRS}")
 include_directories(
     ${PROJECT_BINARY_DIR}
     ${ANTLR4_INCLUDE_DIR}
-    ${ANTLR4_INCLUDE_DIR_oberon_lexer}
     ${ANTLR4_INCLUDE_DIR_oberon_parser}
     )
 
 set(HEADERS
+    CstVisitor.hpp
     )
 
 set(SOURCES
+    CstVisitor.cpp
     main.cpp
     )
+
+message("ANTLR4 source files: ${ANTLR4_SRC_FILES_oberon_parser}")
+
+set(GENERATED_SRCS
+    ${ANTLR4_SRC_FILES_oberon_parser})
+
+list(REMOVE_ITEM ${GENERATED_SRCS} "${ANTLR4_INCLUDE_DIR_oberon_parser}/Oberon.cpp")
 
 add_executable(${PROJECT_NAME}
     ${HEADERS}
     ${SOURCES}
-    ${ANTLR4_SRC_FILES_oberon_lexer}
-    ${ANTLR4_SRC_FILES_oberon_parser}
+    ${GENERATED_SRCS}
     )
 
 add_dependencies(${PROJECT_NAME} antlr4_static)
@@ -70,8 +67,7 @@ target_include_directories(${PROJECT_NAME}
     PUBLIC
       ${LLVM_INCLUDE_DIRS}
       ${ANTLR4_INCLUDE_DIR}
-      ${ANTLR4_INCLUDE_DIR_oberon_lexer}
-      ${ANTLR4_INCLUDE_DIR_oberon_parser}
+      ${GENERATED_SRCS}
       )
 
 target_link_libraries(${PROJECT_NAME} 
