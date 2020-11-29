@@ -7,7 +7,6 @@ class CstVisitor : public oberon::OberonVisitor
 {
   public:
     /* handles defining identifiers*/
-    virtual antlrcpp::Any visitIdentifier(oberon::OberonParser::IdentifierContext* context);
-    virtual antlrcpp::Any visitQualifiedIdentifier(oberon::OberonParser::QualifiedIdentifierContext* context);
-
+    virtual antlrcpp::Any visitIdentifier(oberon::OberonParser::IdentifierContext* context) override;
+    virtual antlrcpp::Any visitQualifiedIdentifier(oberon::OberonParser::QualifiedIdentifierContext* context) override;
 };
