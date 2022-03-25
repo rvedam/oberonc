@@ -58,6 +58,7 @@ include_directories(
 
 set(HEADERS
     CstVisitor.hpp
+    Expr.hpp
     )
 
 set(SOURCES
@@ -88,7 +89,9 @@ target_include_directories(${PROJECT_NAME}
       )
 
 target_link_libraries(${PROJECT_NAME} 
-    PRIVATE
+    PUBLIC
     ${LLVM_LIBRARIES}
+    LLVMSupport
+    PRIVATE
     antlr4_static
     )
