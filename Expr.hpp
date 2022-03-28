@@ -1,5 +1,7 @@
 #pragma once
 
+#include "llvm/IR/LLVMContext.h"
+
 // base class for our AST (All syntax nodes will be based on this)
 class Expr
 {
@@ -7,5 +9,5 @@ class Expr
         virtual ~Expr() = default;
 
         // every expression type must be able to generate its IR representation
-        virtual LLVM::Value* codegen() = 0;
+        virtual llvm::Value* codegen() = 0;
 };

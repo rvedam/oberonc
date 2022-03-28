@@ -3,9 +3,14 @@
 #include "antlr4-runtime.h"
 #include "OberonBaseVisitor.h"
 #include "OberonParser.h"
+#include "SymbolTable.hpp"
+#include "Expr.hpp"
 
 class CstVisitor : public oberon::OberonBaseVisitor
 {
+  private:
+    SymbolTable m_symbolTable;
+    std::unique_ptr<Expr> m_tree;
   public:
     /* handles defining identifiers*/
     virtual antlrcpp::Any visitIdentifier(oberon::OberonParser::IdentifierContext* context) override;

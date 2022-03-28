@@ -59,10 +59,12 @@ include_directories(
 set(HEADERS
     CstVisitor.hpp
     Expr.hpp
+    SymbolTable.hpp
     )
 
 set(SOURCES
     CstVisitor.cpp
+    SymbolTable.cpp
     main.cpp
     )
 
