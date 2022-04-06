@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.0)
 project(oberonc)
 
 # update to using C++17
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 list(APPEND CMAKE_MODULE_PATH
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake
@@ -19,7 +19,7 @@ find_package(LLVM)
 # ANTLR4 JAR (currently documented as version 4.8)
 add_definitions(-DANTLR4CPP_STATIC)
 if(APPLE)
-  set(ANTLR4_JAR_LOCATION "/usr/local/antlr-4.8-complete.jar")
+  set(ANTLR4_JAR_LOCATION "/opt/antlr-4.9.3/antlr-4.9.3-complete.jar")
 else()
   set(ANTLR4_JAR_LOCATION "/usr/local/lib/antlr-4.8-complete.jar")
 endif()
@@ -68,6 +68,7 @@ set(SOURCES
     main.cpp
     )
 
+message("ANTLR4 Include Directory: ${ANTLR4_INCLUDE_DIR}")
 message("ANTLR4 source files: ${ANTLR4_SRC_FILES_oberon_parser}")
 
 
