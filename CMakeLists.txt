@@ -59,14 +59,16 @@ include_directories(
 set(HEADERS
     CstVisitor.hpp
     Expr.hpp
+    Symbol.hpp
     SymbolTable.hpp
-    )
+        ErrorReporter.cpp ErrorReporter.hpp)
 
 set(SOURCES
     CstVisitor.cpp
+    Symbol.cpp
     SymbolTable.cpp
     main.cpp
-    )
+        ErrorReporter.cpp ErrorReporter.hpp)
 
 message("ANTLR4 Include Directory: ${ANTLR4_INCLUDE_DIR}")
 message("ANTLR4 source files: ${ANTLR4_SRC_FILES_oberon_parser}")
