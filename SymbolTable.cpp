@@ -21,7 +21,7 @@ void SymbolTable::add(Symbol &&symbol)
 
 }
 
-void SymbolTable::addModuleExport(std::string name)
+void SymbolTable::addModuleImport(std::string name)
 {
 
 }

@@ -5,9 +5,59 @@ qualIdent : (ID PERIOD)? ID  # QualifiedIdentifier
 identDef : ID (TIMES)?          # ExportedIdentifier
          ;
 
-imprt : ID ASSIGN ID;
-importList : IMPORT imprt (COMMA imprt)* SEMICOLON;
-module : MODULE ID SEMICOLON (importList)? BEGIN END ID PERIOD;
+integer : DIGIT(DIGIT)*
+        | DIGIT(HEXDIGIT)* 'H'
+        ;
+
+real : DIGIT(DIGIT)* decimalPart (scaleFactor)?
+     ;
+
+decimalPart : PERIOD DIGIT*;
+
+scaleFactor : 'E' (PLUS | MINUS)? DIGIT(DIGIT)*
+            ;
+number : integer | real;
+
+string : DOUBLE_QUOTE (CHARACTER)* DOUBLE_QUOTE
+        | DIGIT (HEXDIGIT)* 'X'
+       ;
+
+comment : LPAREN TIMES .*? TIMES RPAREN
+        ;
+
+identifierAssignment : identDef EQUAL
+                    ;
+
+constDeclaration : identifierAssignment expression
+                 ;
+
+expression : simpleExpression relation simpleExpression # ParseExpression
+           ;
+
+simpleExpression : (PLUS | MINUS)? term (addOperator term)*     # ParseSimpleExpression
+                 ;
+
+term : factor (multOperator factor)*
+     ;
+
+factor : (number | string | NIL | TRUE | FALSE)
+       ;
+
+relation : (EQUAL | LESS_THAN | LEQ | GREATER_THAN | GEQ | IN | IS)
+         ;
+
+addOperator : (PLUS | MINUS | OR)   # ParseAddOperator
+            ;
+
+multOperator : TIMES | DIVIDE | DIV | MOD | BITWISEAND;
+
+imprt : ID (ASSIGN ID)?;
+
+importStatement: IMPORT imprt (COMMA imprt)* SEMICOLON;
+
+importList : comment* importStatement+ comment*;
+
+module : MODULE ID SEMICOLON importList? BEGIN? END ID PERIOD;
 
 /* section for special character */
 DOUBLE_QUOTE : '"';
