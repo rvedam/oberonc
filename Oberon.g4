@@ -64,7 +64,7 @@ importStatement: IMPORT imprt (COMMA imprt)* SEMICOLON;
 importList : (importStatement)+;
 
 /* parsing PROCEDUREs */
-procedureDeclaration: procedureHeading procedureBody ID;
+procedureDeclaration: procedureHeading procedureBody ID SEMICOLON;
 procedureHeading: PROCEDURE identDef (formalParameters)? SEMICOLON;
 procedureBody: declarationSequence (BEGIN)? (RETURN)? END;
 formalParameters: LPAREN (fpSection (SEMICOLON fpSection)*)? RPAREN (COLON qualIdent)?;
