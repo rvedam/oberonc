@@ -1,25 +1,29 @@
 grammar Oberon;
 
-qualIdent : (ID PERIOD)? ID  # QualifiedIdentifier
+qualIdent : (ID PERIOD)? ID
           ;
 identDef : ID (TIMES)?          # ExportedIdentifier
          ;
 
-integer : DIGIT(DIGIT)*
-        | DIGIT(HEXDIGIT)* 'H'
+decimalInteger: (DIGIT)+;
+hexInteger: decimalInteger(HEXDIGIT)*'H';
+
+integer : decimalInteger
+        | hexInteger
         ;
 
-real : DIGIT(DIGIT)* decimalPart (scaleFactor)?
+real : decimalInteger decimalPart (scaleFactor)?
      ;
 
-decimalPart : PERIOD DIGIT*;
+decimalPart : PERIOD decimalInteger?;
 
-scaleFactor : 'E' (PLUS | MINUS)? DIGIT(DIGIT)*
+sign : PLUS | MINUS;
+
+scaleFactor : 'E' (sign)? decimalInteger
             ;
-number : integer | real;
 
 string : DOUBLE_QUOTE (CHARACTER)* DOUBLE_QUOTE
-        | DIGIT (HEXDIGIT)* 'X'
+        | decimalInteger(HEXDIGIT)+'X'
        ;
 
 comment : LPAREN TIMES .*? TIMES RPAREN
@@ -28,19 +32,21 @@ comment : LPAREN TIMES .*? TIMES RPAREN
 identifierAssignment : identDef EQUAL
                     ;
 
+constExpression : CONST (constDeclaration SEMICOLON)+;
+
 constDeclaration : identifierAssignment expression
                  ;
 
-expression : simpleExpression relation simpleExpression # ParseExpression
+expression : simpleExpression (relation simpleExpression)?
            ;
 
-simpleExpression : (PLUS | MINUS)? term (addOperator term)*     # ParseSimpleExpression
+simpleExpression : (sign)? term (addOperator term)*
                  ;
 
 term : factor (multOperator factor)*
      ;
 
-factor : (number | string | NIL | TRUE | FALSE)
+factor : integer | real | string | NIL | TRUE | FALSE
        ;
 
 relation : (EQUAL | LESS_THAN | LEQ | GREATER_THAN | GEQ | IN | IS)
@@ -55,9 +61,20 @@ imprt : ID (ASSIGN ID)?;
 
 importStatement: IMPORT imprt (COMMA imprt)* SEMICOLON;
 
-importList : comment* importStatement+ comment*;
+importList : (importStatement)+;
 
-module : MODULE ID SEMICOLON importList? BEGIN? END ID PERIOD;
+/* parsing PROCEDUREs */
+procedureDeclaration: procedureHeading procedureBody ID;
+procedureHeading: PROCEDURE identDef (formalParameters)? SEMICOLON;
+procedureBody: declarationSequence (BEGIN)? (RETURN)? END;
+formalParameters: LPAREN (fpSection (SEMICOLON fpSection)*)? RPAREN (COLON qualIdent)?;
+fpSection: (VAR)? ID (COMMA ID)* COLON formalType;
+formalType: (ARRAY OF)* qualIdent;
+
+/* parsing constants */
+declarationSequence: constExpression? procedureDeclaration*;
+
+module : MODULE ID SEMICOLON (comment)* importList? declarationSequence (comment)* (BEGIN)? END ID PERIOD;
 
 /* section for special character */
 DOUBLE_QUOTE : '"';
@@ -123,12 +140,12 @@ VAR : 'VAR';
 WHILE : 'WHILE';
 
 ID: LETTER(LETTER|DIGIT)*;
+DIGIT: [0-9];       // same goes with numbers
+HEXDIGIT: 'A' | 'B' | 'C' | 'D' | 'E' | 'F'; // hexdecimal digits
 LETTER: [a-zA-Z];   // specifying letters separately due to rules of identifiers
 CHARACTER : LETTER
           | DIGIT
           | DOUBLE_QUOTE
           | SINGLE_QUOTE
           ;
-DIGIT: [0-9];       // same goes with numbers
-HEXDIGIT: DIGIT | 'A' | 'B' | 'C' | 'D' | 'E' | 'F'; // hexdecimal digits
 WS : [ \t\r\n]+ -> skip;
