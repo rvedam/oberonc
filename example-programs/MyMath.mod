@@ -1,5 +1,9 @@
 MODULE MyMath;
-(* A simple Math Library that implements arithmetic operators as functions *)
+
+CONST
+        x = 5;
+        y = 3;
+
 (*
 PROCEDURE AddInt*(x: INTEGER, y: INTEGER): INTEGER;
 VAR result: INTEGER;

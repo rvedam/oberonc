@@ -11,7 +11,6 @@
 #include "CstVisitor.hpp"
 #include "ErrorReporter.hpp"
 
-
 int main(int argc, char** argv) 
 {
   std::vector<std::string> filenames;
@@ -38,8 +37,8 @@ int main(int argc, char** argv)
   for(auto filename : filenames) {
     std::ifstream  ifs(filename);
     if(!ifs.good()) {
-        std::cout << "file: " << filename << "does not exist\n";
-        return -1;
+      std::cout << "file: " << filename << "does not exist\n";
+      return -1;
     }
     std::ostringstream oss;
     oss << ifs.rdbuf();

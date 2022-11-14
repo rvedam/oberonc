@@ -17,13 +17,17 @@ enum class SymbolType
     RECORD_TYPE,
     PROCEDURE_TYPE
 };
+
+std::string toString(SymbolType type);
+
 class Symbol
 {
 private:
-    std::string m_name;           // name of symbol
-    bool m_exported;              // whether symbol is exported
-    bool m_variable;              // whether symbol represents a variable
-    SymbolType m_type;            // underlying type of symbol
+    std::string m_name;             // name of symbol
+    bool m_exported;                // whether symbol is exported
+    bool m_variable;                // whether symbol represents a variable
+    SymbolType m_type;              // underlying type of symbol
+    std::string m_userDefinedType;  // user-defined type
 public:
     explicit Symbol(std::string name, SymbolType type, bool variable, bool exported) :
     m_name(name),
@@ -32,19 +36,10 @@ public:
     m_type(type) {}
 
     std::string name() const;
-    bool isExported() const;
-    bool isVariable() const;
+    bool exported() const;
+    bool variable() const;
     SymbolType type() const;
     friend std::ostream &operator<<(std::ostream &os, const Symbol &symbol);
-};
-
-class PointerSymbol : public Symbol
-{
-private:
-    Symbol m_pointerType;
-public:
-    explicit PointerSymbol(std::string name, Symbol pointerType, bool exported);
-    Symbol pointerType() const;
 };
 
 class RecordTypeSymbol : public Symbol

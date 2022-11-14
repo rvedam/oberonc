@@ -62,7 +62,7 @@ set(HEADERS
     Symbol.hpp
     SymbolTable.hpp
     ErrorReporter.hpp
-    FunctionSymbol.hpp ArrayTypeSymbol.cpp ArrayTypeSymbol.h)
+    FunctionSymbol.hpp ArrayTypeSymbol.cpp ArrayTypeSymbol.hpp)
 
 set(SOURCES
     CstVisitor.cpp
@@ -70,7 +70,7 @@ set(SOURCES
     SymbolTable.cpp
     ErrorReporter.cpp
     main.cpp
-    FunctionSymbol.cpp PointerTypeSymbol.cpp ProcedureTypeSymbol.hpp)
+    FunctionSymbol.cpp PointerTypeSymbol.cpp PointerTypeSymbol.hpp)
 
 message("ANTLR4 Include Directory: ${ANTLR4_INCLUDE_DIR}")
 message("ANTLR4 source files: ${ANTLR4_SRC_FILES_oberon_parser}")
