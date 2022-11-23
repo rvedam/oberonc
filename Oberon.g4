@@ -32,35 +32,29 @@ comment : LPAREN TIMES .*? TIMES RPAREN
 identifierAssignment : identDef EQUAL
                     ;
 
-constExpression : CONST (constDeclaration SEMICOLON)+;
-
+/* parsing constants */
+constDefinition : CONST (constDeclaration SEMICOLON)*;
 constDeclaration : identifierAssignment expression
                  ;
 
+/* parsing expressions */
 expression : simpleExpression (relation simpleExpression)?
            ;
-
 simpleExpression : (sign)? term (addOperator term)*
                  ;
-
 term : factor (multOperator factor)*
      ;
-
 factor : integer | real | string | NIL | TRUE | FALSE
        ;
-
 relation : (EQUAL | LESS_THAN | LEQ | GREATER_THAN | GEQ | IN | IS)
          ;
-
 addOperator : (PLUS | MINUS | OR)   # ParseAddOperator
             ;
-
 multOperator : TIMES | DIVIDE | DIV | MOD | BITWISEAND;
 
+/* parsing imports (libraries)*/
 imprt : ID (ASSIGN ID)?;
-
 importStatement: IMPORT imprt (COMMA imprt)* SEMICOLON;
-
 importList : (importStatement)+;
 
 /* parsing PROCEDUREs */
@@ -71,8 +65,13 @@ formalParameters: LPAREN (fpSection (SEMICOLON fpSection)*)? RPAREN (COLON qualI
 fpSection: (VAR)? ID (COMMA ID)* COLON formalType;
 formalType: (ARRAY OF)* qualIdent;
 
-/* parsing constants */
-declarationSequence: constExpression? procedureDeclaration*;
+/* parsing variables */
+identList : identDef (COMMA identDef)*;
+type : qualIdent;
+varDeclaration : identList COLON type;
+varDefinition : VAR (varDeclaration SEMICOLON)*;
+
+declarationSequence: constDefinition? varDefinition? procedureDeclaration*;
 
 module : MODULE ID SEMICOLON (comment)* importList? declarationSequence (comment)* (BEGIN)? END ID PERIOD;
 

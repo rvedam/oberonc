@@ -6,6 +6,7 @@ CONST
 
 
 PROCEDURE AddInt*(x, y: INTEGER): INTEGER;
+VAR result: INTEGER;
 BEGIN
 END AddInt;
 
