@@ -1,14 +1,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <utility>
+#include <llvm/IR/LLVMContext.h>
 
-#include "antlr4-runtime.h"
-#include "CstVisitor.hpp"
-#include "OberonLexer.h"
-#include "OberonParser.h"
 #include "ErrorReporter.hpp"
-#include "TokenType.hpp"
 #include "Tokenizer.hpp"
 
 
@@ -41,7 +36,6 @@ int main(int argc, char** argv)
       std::cout << "file: " << filename << "does not exist\n";
       return -1;
     }
-
     Tokenizer tokenizer(filename);
     tokenizer.scan();
     tokenizer.printTokens();
