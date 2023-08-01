@@ -41,7 +41,7 @@ public:
 class FunctionExpr : public Expr
 {
 private:
-  std::vector<std::string> m_types;
+  std::vector<std::string> m_args;
   std::string m_ret;
 public:
   FunctionExpr();

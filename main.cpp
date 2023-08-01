@@ -1,15 +1,16 @@
 #include <iostream>
 #include <string>
-#include <sstream>
 #include <vector>
-#include "CstVisitor.hpp"
-#include "llvm/IR/IRBuilder.h"
+#include <utility>
 
 #include "antlr4-runtime.h"
+#include "CstVisitor.hpp"
 #include "OberonLexer.h"
 #include "OberonParser.h"
-#include "CstVisitor.hpp"
 #include "ErrorReporter.hpp"
+#include "TokenType.hpp"
+#include "Tokenizer.hpp"
+
 
 int main(int argc, char** argv) 
 {
@@ -40,16 +41,13 @@ int main(int argc, char** argv)
       std::cout << "file: " << filename << "does not exist\n";
       return -1;
     }
-    std::ostringstream oss;
-    oss << ifs.rdbuf();
 
-    antlr4::ANTLRInputStream is(oss.str());
-    oberon::OberonLexer lexer(&is);
-    lexer.removeErrorListeners();
-    antlr4::CommonTokenStream tokens(&lexer);
-    oberon::OberonParser parser(&tokens);
-    CstVisitor visitor(&reporter);
-    visitor.visitModule(parser.module());
+    Tokenizer tokenizer(filename);
+    tokenizer.scan();
+    tokenizer.printTokens();
+
+    // TODO: Need to move this into its own class
+    llvm::LLVMContext ctx;
   }
 
   return 0;

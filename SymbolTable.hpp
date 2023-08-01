@@ -16,6 +16,7 @@ public:
     void add(Symbol&& symbol); // move symbols into symbol table to transfer ownership
     void addModuleImport(std::string name);
     void createChildTable(std::string name);
+    Symbol* retrieve(std::string name) const;
 private:
     std::vector<std::unique_ptr<Symbol>> scope;
     std::vector<std::unique_ptr<SymbolTable>> inner_scopes;

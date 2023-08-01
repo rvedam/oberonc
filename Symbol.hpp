@@ -12,6 +12,7 @@ enum class SymbolType
 {
     INTEGER,
     REAL,
+    STRING,
     ARRAY_TYPE,
     POINTER_TYPE,
     RECORD_TYPE,

@@ -47,8 +47,15 @@ if(${ANTLR_FOUND})
   message("ANTLR Static Library Directory: ${ANTLR4_STATIC_LIBRARIES}")
 endif()
 
+# grab all the LLVM libraries (will prune later on)
+execute_process(COMMAND llvm-config --libs all
+                OUTPUT_VARIABLE llvm_libraries)
+execute_process(COMMAND llvm-config --cxxflags all
+                OUTPUT_VARIABLE llvm_cxx_flags)
+
 message("LLVM Include Directory: ${LLVM_INCLUDE_DIRS}")
 message("LLVM Lib Directory: ${LLVM_LIBRARY_DIRS}")
+message("LLVM Libraries: ${llvm_libraries}")
 
 include_directories(
     ${PROJECT_BINARY_DIR}
@@ -57,20 +64,32 @@ include_directories(
     )
 
 set(HEADERS
+    ArrayTypeSymbol.hpp
     CstVisitor.hpp
+    ErrorReporter.hpp
     Expr.hpp
+    FunctionSymbol.hpp
     Symbol.hpp
     SymbolTable.hpp
-    ErrorReporter.hpp
-    FunctionSymbol.hpp ArrayTypeSymbol.cpp ArrayTypeSymbol.hpp)
+    Tokenizer.hpp
+    TokenType.hpp
+    OberonParser.hpp
+    Token.hpp)
 
 set(SOURCES
+    ArrayTypeSymbol.cpp
     CstVisitor.cpp
     Symbol.cpp
     SymbolTable.cpp
     ErrorReporter.cpp
     main.cpp
-    FunctionSymbol.cpp PointerTypeSymbol.cpp PointerTypeSymbol.hpp)
+    FunctionSymbol.cpp
+    PointerTypeSymbol.cpp
+    PointerTypeSymbol.hpp
+    Tokenizer.cpp
+    TokenType.cpp
+    OberonParser.cpp
+    Token.cpp)
 
 message("ANTLR4 Include Directory: ${ANTLR4_INCLUDE_DIR}")
 message("ANTLR4 source files: ${ANTLR4_SRC_FILES_oberon_parser}")
@@ -94,11 +113,11 @@ target_include_directories(${PROJECT_NAME}
       ${ANTLR4_INCLUDE_DIR}
       ${ANTLR4_INCLUDE_DIR_oberon_parser}
       )
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${llvm_options}")
 
-target_link_libraries(${PROJECT_NAME} 
+target_link_libraries(${PROJECT_NAME}
     PUBLIC
-    ${LLVM_LIBRARIES}
-    LLVMSupport
+    LLVMCore
     PRIVATE
     antlr4_static
     )
