@@ -19,8 +19,8 @@ private:
   TokenStream tokens;   // stream of scanned tokens.
   std::ifstream ifs;    // stream representing the file getting scanned.
   std::string filename; // name of file getting scanned.
-  size_t line;          // line number in the file
-  size_t pos;           // position in the line
+  int line;          // line number in the file
+  int pos;           // position in the line
 public:
   // TODO: probably will want to create a way to handle multiple files (will require lazily parsing the individual files)
   /**

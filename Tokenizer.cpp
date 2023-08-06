@@ -21,7 +21,7 @@ void Tokenizer::scan() {
     } else if (std::regex_match(cmpStrm.str(), specialChar) || *charIter == '[' || *charIter == ']') {
       oss << *charIter;
       auto tokenType = getTokenType(oss.str());
-      tokens.emplace_back(Token{tokenType.value(), oss.str(), filename, line, pos});
+      tokens.emplace_back(Token{tokenType.value(), oss.str(), filename, line++, pos++});
       charIter++;
     } else if (*charIter == ':') {
       oss << *charIter;
@@ -49,6 +49,7 @@ void Tokenizer::scan() {
       }
       else
         tokens.emplace_back(Token{TokenType::IDENTIFIER, oss.str(), filename, line, pos});
+      pos += oss.str().size();
     }
   }
 }

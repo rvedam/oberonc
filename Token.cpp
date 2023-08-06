@@ -19,12 +19,12 @@ const std::string &Token::getFilename() const
   return filename;
 }
 
-size_t Token::getLine() const
+int Token::getLine() const
 {
   return line;
 }
 
-size_t Token::getColumn() const
+int Token::getColumn() const
 {
   return column;
 }
@@ -35,3 +35,6 @@ std::ostream &operator<<(std::ostream &os, const Token &token)
      << token.line << " column: " << token.column << ">";
   return os;
 }
+
+Token::Token(TokenType mType, const std::string mStr, const std::string filename, int line, int column) : m_type(
+    mType), m_str(mStr), filename(filename), line(line), column(column) {}

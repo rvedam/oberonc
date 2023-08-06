@@ -5,6 +5,7 @@
 #pragma once
 
 #include <ostream>
+#include <string>
 #include "TokenType.hpp"
 
 class Token
@@ -13,15 +14,18 @@ private:
   TokenType m_type;
   std::string m_str;
   std::string filename;
-  size_t line;
-  size_t column;
+  int line;
+  int column;
 public:
-  explicit Token(TokenType type, std::string str, std::string filename, size_t line, size_t column);
+  Token() = delete;
+  explicit Token(TokenType type, const std::string str, const std::string filename, int line, int column);
+
+  Token(std::initializer_list<Token>){}
   TokenType getTokenType() const;
   const std::string &getParsedString() const;
   const std::string &getFilename() const;
-  size_t getLine() const;
-  size_t getColumn() const;
+  int getLine() const;
+  int getColumn() const;
 
   friend std::ostream &operator<<(std::ostream &os, const Token &token);
 };
