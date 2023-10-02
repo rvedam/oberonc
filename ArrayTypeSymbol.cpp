@@ -4,12 +4,9 @@
 
 #include "ArrayTypeSymbol.hpp"
 
-ArrayTypeSymbol::ArrayTypeSymbol(std::string name,
-                                 Symbol arrayType,
-                                 int arraySize,
-                                 bool isDynamic,
-                                 bool exported) :
-                                 Symbol(name, SymbolType::ARRAY_TYPE, false, exported),
+ArrayTypeSymbol::ArrayTypeSymbol(std::string name, std::string module, Symbol arrayType, int arraySize,
+                                 bool isDynamic, bool exported) :
+                                 Symbol(name, module, SymbolType::ARRAY_TYPE, false, exported),
                                  m_arrayType(arrayType),
                                  m_arraySize(arraySize),
                                  m_dynamic(isDynamic) {}

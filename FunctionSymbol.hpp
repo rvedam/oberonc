@@ -14,16 +14,13 @@ public:
   /**
    * @brief constructor of FunctionSymbol
    * @param name
-   * @param args
-   * @param returnType
+   * @param mArgs
+   * @param mReturn
    * @param variable
    * @param exported
    */
-    explicit FunctionSymbol(std::string name,
-                            std::vector<Symbol>&& args,
-                            Symbol&& returnType,
-                            const bool variable,
-                            const bool exported);
+    explicit FunctionSymbol(std::string name, std::string moduleName, std::vector<Symbol> &&mArgs,
+                            Symbol &&mReturn, bool variable, bool exported);
 
   /**
    * @brief returns the vector containing the argument symbols of the function

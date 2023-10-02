@@ -25,21 +25,19 @@ class Symbol
 {
 private:
     std::string m_name;             // name of symbol
+    std::string m_module;           // module symbol is exported from
     bool m_exported;                // whether symbol is exported
     bool m_variable;                // whether symbol represents a variable
     SymbolType m_type;              // underlying type of symbol
     std::string m_userDefinedType;  // user-defined type
 public:
-    explicit Symbol(std::string name, SymbolType type, bool variable, bool exported) :
-    m_name(name),
-    m_exported(exported),
-    m_variable(variable),
-    m_type(type) {}
-
+    explicit Symbol(std::string name, std::string module, SymbolType type, bool variable, bool exported);
+    virtual ~Symbol() noexcept;
     std::string name() const;
     bool exported() const;
     bool variable() const;
     SymbolType type() const;
+    std::string module() const;
     friend std::ostream &operator<<(std::ostream &os, const Symbol &symbol);
 };
 

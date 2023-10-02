@@ -4,8 +4,9 @@
 
 #include "PointerTypeSymbol.hpp"
 
-PointerSymbol::PointerSymbol(std::string name, Symbol pointerType, bool variable, bool exported) :
-    Symbol(name, SymbolType::POINTER_TYPE, variable, exported),
+PointerSymbol::PointerSymbol(std::string name, std::string moduleName, Symbol pointerType, bool variable,
+                             bool exported) :
+    Symbol(name, moduleName, SymbolType::POINTER_TYPE, variable, exported),
     m_pointerType(pointerType)
 {
 

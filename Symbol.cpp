@@ -4,6 +4,17 @@
 
 #include "Symbol.hpp"
 
+Symbol::Symbol(std::string name, std::string module, SymbolType type, bool variable, bool exported) :
+    m_name(name),
+    m_module(module),
+    m_exported(exported),
+    m_variable(variable),
+    m_type(type)
+{
+}
+
+Symbol::~Symbol() noexcept {}
+
 std::string Symbol::name() const { return m_name; }
 
 std::ostream &operator<<(std::ostream &os, const Symbol &symbol)
@@ -45,5 +56,10 @@ bool Symbol::variable() const
 
 SymbolType Symbol::type() const
 {
-  return SymbolType::REAL;
+  return m_type;
+}
+
+std::string Symbol::module() const
+{
+  return m_module;
 }

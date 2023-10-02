@@ -14,13 +14,14 @@ class OberonParser
 {
 private:
   SymbolTable symbols;
-  std::unique_ptr<Expr> ast;
-  std::unique_ptr<ErrorReporter> reporter;
+  std::unique_ptr<Expr> m_ast;
+  ErrorReporter* reporter;
   void parseConsts();
   void parseTypes();
   void parseProcedures();
-  void parseComments();
 public:
   explicit OberonParser(ErrorReporter* reporter);
+  Expr* ast() const;
+  SymbolTable symbolTable() const;
   void parseModule(Tokenizer* tokenizer);
 };

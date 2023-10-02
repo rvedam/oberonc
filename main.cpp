@@ -5,6 +5,7 @@
 
 #include "ErrorReporter.hpp"
 #include "Tokenizer.hpp"
+#include "OberonParser.hpp"
 
 
 int main(int argc, char** argv) 
@@ -38,11 +39,14 @@ int main(int argc, char** argv)
     }
     Tokenizer tokenizer(filename);
     tokenizer.scan();
-    tokenizer.printTokens();
 
+    OberonParser parser(&reporter);
+    parser.parseModule(&tokenizer);
     // TODO: Need to move this into its own class
     llvm::LLVMContext ctx;
   }
 
+  // report any errors found in code.
+  reporter.printErrors();
   return 0;
 }

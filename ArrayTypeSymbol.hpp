@@ -16,11 +16,8 @@ private:
   int m_arraySize;    /// -1 if dynamic array otherwise sizeof(array)
   bool m_dynamic;     /// true if dynamic array
 public:
-  explicit ArrayTypeSymbol(std::string name,
-                           Symbol arrayType,
-                           int arraySize,
-                           bool isDynamic,
-                           bool exported);
+  explicit ArrayTypeSymbol(std::string name, std::string module, Symbol arrayType, int arraySize,
+                           bool isDynamic, bool exported);
 
   bool isDynamic() const;
   int size() const;

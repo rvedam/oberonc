@@ -11,6 +11,7 @@ class PointerSymbol : public Symbol
 private:
   Symbol m_pointerType;
 public:
-  explicit PointerSymbol(std::string name, Symbol pointerType, bool variable, bool exported);
+  explicit PointerSymbol(std::string name, std::string moduleName, Symbol pointerType, bool variable,
+                         bool exported);
   Symbol pointerType() const;
 };

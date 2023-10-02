@@ -7,10 +7,9 @@
 #include "Symbol.hpp"
 #include "FunctionSymbol.hpp"
 
-FunctionSymbol::FunctionSymbol(std::string name,
-                               std::vector<Symbol> &&mArgs,
+FunctionSymbol::FunctionSymbol(std::string name, std::string moduleName, std::vector<Symbol> &&mArgs,
                                Symbol &&mReturn, bool variable, bool exported) :
-  Symbol(name, SymbolType::PROCEDURE_TYPE, variable,exported),
+  Symbol(name, moduleName, SymbolType::PROCEDURE_TYPE, variable,exported),
   m_args(std::move(mArgs)),
   m_return(std::move(mReturn)) {
 
