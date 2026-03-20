@@ -55,3 +55,67 @@ The project implements a **recursive-descent LL(1) parser** for the **Oberon-07*
 ### Grammar reference
 
 The full Oberon-07 EBNF is in the Appendix of the official language report: `Oberon07.Report.pdf` (Niklaus Wirth, ETH Zurich). The key productions the parser implements are: `module`, `DeclarationSequence`, `ProcedureDeclaration`, `statement`, `expression`, `designator`, `type`.
+
+## Bootable images (freestanding runtime)
+
+The `runtime/` directory contains a bare-metal runtime that replaces `liboberon_runtime.a` for freestanding targets (no OS, no libc).
+
+### Architecture
+
+| Path | Role |
+|---|---|
+| `runtime/oberon_runtime_bare.cpp` | Implements `Out_*`, `In_*`, `Oberon_NEW` via `hal_*` calls; 1 MiB bump-allocator heap in BSS |
+| `runtime/platform/hal.hpp` | HAL interface: `hal_init()`, `hal_putc()`, `hal_getc()`, `hal_halt()` |
+| `runtime/platform/x86_64/hal.cpp` | x86-64 HAL: VGA text buffer (0xB8000) + COM1 UART (0x3F8, 38400 baud 8N1) |
+| `runtime/platform/aarch64/hal.cpp` | AArch64 HAL: PL011 UART at 0x09000000 (QEMU `virt` machine, 38400 baud) |
+| `runtime/boot/x86_64/boot.S` | Multiboot2 header, 32→64 mode switch, identity-maps first 1 GiB with 2 MiB huge pages, zeroes BSS |
+| `runtime/boot/x86_64/kernel.ld` | Linker script: loads at 0x100000, `.multiboot2` first |
+| `runtime/boot/aarch64/boot.S` | Drops from EL2→EL1, sets stack, zeroes BSS |
+| `runtime/boot/aarch64/kernel.ld` | Linker script: loads at 0x40080000 |
+
+Boot sequence in both architectures: `_start` → `hal_init()` → `oberon_main()` → `hal_halt()`.
+
+### CMake targets
+
+```bash
+# Build x86-64 kernel ELF (links Hello.ll by default)
+cmake --build build --target kernel_x86_64
+# Output: build/kernel_x86_64.elf
+
+# Build AArch64 kernel ELF (requires aarch64-linux-gnu-ld)
+cmake --build build --target kernel_aarch64
+# Output: build/kernel_aarch64.elf
+```
+
+The `kernel_x86_64` target assembles `tests/Hello.ll` via `llc-14`, then links:
+`boot_x86_64.o` + `hello_x86.o` + `liboberon_runtime_x86_64.a`
+
+The `kernel_aarch64` target assembles via `llc --march=aarch64`, then links with `aarch64-linux-gnu-ld`.
+
+### Running with QEMU
+
+```bash
+# x86-64: serial output on stdio; Multiboot2 via GRUB/QEMU direct kernel boot
+qemu-system-x86_64 -kernel build/kernel_x86_64.elf \
+    -serial stdio -display none -no-reboot
+
+# AArch64: QEMU virt machine; PL011 UART on stdio
+qemu-system-aarch64 -M virt -cpu cortex-a57 \
+    -kernel build/kernel_aarch64.elf \
+    -serial stdio -display none -no-reboot
+```
+
+### Compile flags
+
+| Flag | Reason |
+|---|---|
+| `-ffreestanding` | No implicit libc; disables built-ins that assume OS |
+| `-mno-red-zone` | x86-64 only; interrupt handlers may clobber the red zone |
+| `-O2` | Required for FPU-safe code generation in the bare runtime |
+
+### Adding a new Oberon module to the kernel
+
+1. Compile the `.Mod` file to LLVM IR: `./build/oberonc MyMod.Mod` → `MyMod.ll`
+2. Assemble to object: `llc-14 --march=x86-64 --filetype=obj MyMod.ll -o MyMod.o` (or `llc --march=aarch64` for AArch64)
+3. Link: replace `hello_x86.o` with `MyMod.o` in the `ld` invocation (or extend `CMakeLists.txt`)
+4. Boot with QEMU as above.
