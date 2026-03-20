@@ -1,0 +1,10 @@
+build/
+.cache/
+.claude/
+*.o
+*.a
+*.s
+*.ll
+*.swp
+tests/Hello
+tests/Features
