@@ -215,6 +215,10 @@ struct ForStmt : Stmt {
     StmtSeq     body;
 };
 
+struct ReturnStmt : Stmt {
+    ExprPtr value;  // nullptr if bare RETURN
+};
+
 // -----------------------------------------------------------------------
 // Declarations
 // -----------------------------------------------------------------------

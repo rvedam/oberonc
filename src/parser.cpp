@@ -805,8 +805,10 @@ std::shared_ptr<ProcDecl> Parser::parseProcedureDeclaration() {
 
     if (match(TokenKind::Begin))
         node->body = parseStatementSequence();
-    if (match(TokenKind::Return))
+    if (match(TokenKind::Return)) {
         node->returnExpr = parseExpression();
+        match(TokenKind::Semicolon); // allow optional trailing ";"
+    }
 
     expect(TokenKind::End);
 
@@ -833,7 +835,8 @@ Module Parser::parseModule() {
     m.name = parseIdent();
     expect(TokenKind::Semicolon);
 
-    if (match(TokenKind::Import)) {
+    // Accept one or more IMPORT sections (some Oberon dialects allow multiple)
+    while (match(TokenKind::Import)) {
         auto parseImport = [&]() {
             ImportEntry ie;
             ie.loc  = cur_.loc;
@@ -856,6 +859,7 @@ Module Parser::parseModule() {
         m.body = parseStatementSequence();
 
     expect(TokenKind::End);
+    match(TokenKind::Module); // accept optional 'MODULE' in 'END MODULE Name.'
 
     std::string closing = parseIdent();
     if (closing != m.name)

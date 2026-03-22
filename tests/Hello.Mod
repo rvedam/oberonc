@@ -3,7 +3,7 @@ MODULE Hello;
 IMPORT Out;
 
 CONST
-  Greeting* = "Hello, World!";
+  Greeting = "Hello, World!";
 
 VAR
   x, y: INTEGER;

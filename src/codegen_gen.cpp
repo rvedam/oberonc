@@ -322,6 +322,14 @@ void CodeGen::genStmt(const Stmt& s) {
     if (auto* w = dynamic_cast<const WhileStmt*>(&s))     { genWhile(*w);  return; }
     if (auto* r = dynamic_cast<const RepeatStmt*>(&s))    { genRepeat(*r); return; }
     if (auto* f = dynamic_cast<const ForStmt*>(&s))       { genFor(*f);    return; }
+    if (auto* r = dynamic_cast<const ReturnStmt*>(&s)) {
+        if (r->value && retAlloca_) {
+            auto* v = genExpr(*r->value);
+            b_->CreateStore(coerce(v, curFunc_->getReturnType()), retAlloca_);
+        }
+        b_->CreateBr(exitBlock_);
+        return;
+    }
 }
 
 // assignment = designator ":=" expression

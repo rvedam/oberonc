@@ -1,14 +1,23 @@
 #include "codegen.hpp"
+#include "lexer.hpp"
+#include "parser.hpp"
 
 #include <llvm/IR/Type.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/Host.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
 #include <llvm/IR/DataLayout.h>
 
 #include <cassert>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <cstdlib>
@@ -38,6 +47,36 @@ void CodeGen::writeIR(llvm::raw_ostream& os) {
         throw std::runtime_error("LLVM module verification failed:\n" + err);
     }
     llvmMod_->print(os, nullptr);
+}
+
+void CodeGen::writeObject(const std::string& path) {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+
+    std::string targetTriple = llvm::sys::getDefaultTargetTriple();
+    llvmMod_->setTargetTriple(targetTriple);
+
+    std::string err;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(targetTriple, err);
+    if (!target)
+        throw std::runtime_error("LLVM target lookup failed: " + err);
+
+    llvm::TargetOptions opt;
+    auto rm = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+    auto* tm = target->createTargetMachine(targetTriple, "generic", "", opt, rm);
+    llvmMod_->setDataLayout(tm->createDataLayout());
+
+    std::error_code ec;
+    llvm::raw_fd_ostream dest(path, ec, llvm::sys::fs::OF_None);
+    if (ec) throw std::runtime_error("cannot open object output: " + ec.message());
+
+    llvm::legacy::PassManager pm;
+    if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CGFT_ObjectFile))
+        throw std::runtime_error("LLVM cannot emit object file for this target");
+
+    pm.run(*llvmMod_);
+    dest.flush();
+    delete tm;
 }
 
 // -----------------------------------------------------------------------
@@ -364,7 +403,81 @@ void CodeGen::genImports(const std::vector<ImportEntry>& imports) {
             decl("In_Char", llvm::FunctionType::get(voidTy,
                 {llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0)}, false));
         }
-        // Other modules: add as needed
+        // Other (user-defined) modules: parse source and declare exported procs
+        else {
+            loadModuleInterface(modAlias, mod);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Load an imported user-defined module's interface by parsing its source
+// -----------------------------------------------------------------------
+void CodeGen::loadModuleInterface(const std::string& alias,
+                                   const std::string& modName) {
+    // Search for ModuleName.Mod in the module search paths
+    std::string source;
+    bool found = false;
+    for (auto& dir : modulePaths_) {
+        std::string path = dir + "/" + modName + ".Mod";
+        std::ifstream f(path);
+        if (f) {
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            source = ss.str();
+            found = true;
+            break;
+        }
+    }
+    if (!found) return; // silently skip; errors will surface at link time
+
+    loadedUserModules_.push_back({alias, modName});
+
+    // Parse the module to extract exported procedure signatures
+    Module importedMod;
+    try {
+        Lexer  lex(source, modName + ".Mod");
+        Parser parser(lex);
+        importedMod = parser.parseModule();
+    } catch (...) {
+        return; // parse failure → skip
+    }
+
+    // Declare each exported procedure as an external LLVM function
+    for (auto& pd : importedMod.decls.procs) {
+        if (!pd->exported) continue;
+
+        std::string fname = modName + "_" + pd->name;
+        if (llvmMod_->getFunction(fname)) continue; // already declared
+
+        std::vector<llvm::Type*> paramTys;
+        if (pd->params) {
+            for (auto& sec : pd->params->sections) {
+                // Map Oberon types to LLVM types using the type name
+                llvm::Type* lt = nullptr;
+                if (auto* q = dynamic_cast<const QualIdentType*>(sec.formalType.get())) {
+                    auto it = typeTable_.find(q->ident);
+                    if (it != typeTable_.end())
+                        lt = toLLVM(it->second);
+                }
+                if (!lt) lt = llvm::Type::getInt64Ty(ctx_); // default to i64
+                if (sec.isVar) lt = llvm::PointerType::get(lt, 0);
+                for (size_t i = 0; i < sec.names.size(); ++i)
+                    paramTys.push_back(lt);
+            }
+        }
+
+        llvm::Type* retTy = llvm::Type::getVoidTy(ctx_);
+        if (pd->params && !pd->params->retIdent.empty()) {
+            auto it = typeTable_.find(pd->params->retIdent);
+            if (it != typeTable_.end())
+                retTy = toLLVM(it->second);
+        }
+
+        auto* ft = llvm::FunctionType::get(retTy, paramTys, false);
+        auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                           fname, llvmMod_.get());
+        extFuncs_[alias + "_" + pd->name] = fn;
     }
 }
 
@@ -584,13 +697,15 @@ void CodeGen::generate(const Module& mod) {
     genImports(mod.imports);
     genDecls(mod.decls, /*global=*/true);
 
-    // Generate void oberon_main() from the module body.
-    // The hosted runtime provides int main() which calls oberon_main().
-    // The bare-metal boot stub calls oberon_main() directly.
+    // Generate void oberon_main() from the module body, OR
+    // void ModuleName_init() when compiled as an imported dependency.
+    std::string mainFuncName = moduleInitOnly_
+        ? (modName_ + "_init")
+        : "oberon_main";
     auto* mainTy = llvm::FunctionType::get(
         llvm::Type::getVoidTy(ctx_), {}, false);
     auto* mainFn = llvm::Function::Create(
-        mainTy, llvm::Function::ExternalLinkage, "oberon_main", llvmMod_.get());
+        mainTy, llvm::Function::ExternalLinkage, mainFuncName, llvmMod_.get());
 
     curFunc_   = mainFn;
     auto* entry = llvm::BasicBlock::Create(ctx_, "entry", mainFn);

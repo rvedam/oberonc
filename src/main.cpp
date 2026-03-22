@@ -6,6 +6,8 @@
 #include <iostream>
 #include <sstream>
 #include <filesystem>
+#include <cstdlib>
+#include <string>
 
 static std::string readFile(const std::string& path) {
     std::ifstream f(path);
@@ -18,36 +20,127 @@ static std::string readFile(const std::string& path) {
     return ss.str();
 }
 
-// Derive output path: replace .Mod extension (or append) with .ll
-static std::string outputPath(const std::string& input) {
+// Derive a stem path (no extension) from the input file
+static std::string stemPath(const std::string& input) {
     std::filesystem::path p(input);
-    return (p.parent_path() / p.stem()).string() + ".ll";
+    return (p.parent_path() / p.stem()).string();
+}
+
+// Invoke system linker: cc <objFiles...> <runtimeLib> -o <exeOut>
+static void link(const std::vector<std::string>& objFiles, const std::string& exeOut) {
+#ifndef OBERON_RUNTIME_LIB
+#error "OBERON_RUNTIME_LIB must be defined by CMake"
+#endif
+    std::string cmd = "cc";
+    for (auto& f : objFiles) cmd += " \"" + f + "\"";
+    cmd += " \"" OBERON_RUNTIME_LIB "\" -o \"" + exeOut + "\"";
+    int rc = std::system(cmd.c_str());
+    if (rc != 0)
+        throw std::runtime_error("linker invocation failed (exit " + std::to_string(rc) + ")");
+}
+
+// Compile a single Oberon source file to a native object, returning the obj path
+static std::string compileToObject(const std::string& modSrcPath) {
+    std::string src = [&] {
+        std::ifstream f(modSrcPath);
+        if (!f) throw std::runtime_error("cannot open '" + modSrcPath + "'");
+        std::ostringstream ss; ss << f.rdbuf(); return ss.str();
+    }();
+
+    std::filesystem::path p(modSrcPath);
+    std::string stem = (p.parent_path() / p.stem()).string();
+
+    Lexer  lex(src, modSrcPath);
+    Parser parser(lex);
+    Module mod = parser.parseModule();
+
+    CodeGen cg(mod.name);
+    std::string dir = p.parent_path().string();
+    if (dir.empty()) dir = ".";
+    cg.setModulePaths({dir});
+    cg.setModuleInitOnly(true); // don't emit oberon_main for imported modules
+    cg.generate(mod);
+
+    std::string objPath = stem + ".o";
+    cg.writeObject(objPath);
+    return objPath;
+}
+
+static void usage() {
+    std::cerr <<
+        "usage: oberonc [--emit-llvm] [-o output] <file.Mod>\n"
+        "  --emit-llvm   emit LLVM IR (.ll) instead of linking an executable\n"
+        "  -o output     output file path (executable, or .ll with --emit-llvm)\n";
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "usage: oberonc <file.Mod> [output.ll]\n";
-        return 1;
+    bool emitLLVM = false;
+    std::string outputArg;
+    std::string srcPath;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--emit-llvm") {
+            emitLLVM = true;
+        } else if (a == "-o") {
+            if (++i >= argc) { usage(); return 1; }
+            outputArg = argv[i];
+        } else if (a[0] == '-') {
+            std::cerr << "error: unknown flag '" << a << "'\n";
+            usage();
+            return 1;
+        } else {
+            if (!srcPath.empty()) { usage(); return 1; }
+            srcPath = a;
+        }
     }
 
-    std::string srcPath = argv[1];
-    std::string source  = readFile(srcPath);
+    if (srcPath.empty()) { usage(); return 1; }
+
+    std::string source = readFile(srcPath);
+    std::string stem   = stemPath(srcPath);
 
     try {
-        // ---- Parse ----
         Lexer  lexer(source, srcPath);
         Parser parser(lexer);
         Module mod = parser.parseModule();
 
-        // ---- Code generation ----
         CodeGen cg(mod.name);
+        // Pass the source file's directory so imports can be resolved
+        std::string srcDir = std::filesystem::path(srcPath).parent_path().string();
+        if (srcDir.empty()) srcDir = ".";
+        cg.setModulePaths({srcDir});
         cg.generate(mod);
 
-        // ---- Emit LLVM IR ----
-        std::string outPath = (argc >= 3) ? argv[2] : outputPath(srcPath);
-        cg.writeIR(outPath);
+        if (emitLLVM) {
+            std::string out = outputArg.empty() ? stem + ".ll" : outputArg;
+            cg.writeIR(out);
+            std::cout << "OK: '" << srcPath << "' → '" << out << "'\n";
+        } else {
+            // Emit object file then link (including any imported user modules)
+            std::string objPath = stem + ".o";
+            std::string exePath = outputArg.empty() ? stem : outputArg;
+            cg.writeObject(objPath);
 
-        std::cout << "OK: '" << srcPath << "' → '" << outPath << "'\n";
+            // Compile imported user modules to object files
+            std::vector<std::string> allObjs = {objPath};
+            std::vector<std::string> tempObjs;
+            for (auto& [alias, modName] : cg.loadedUserModules()) {
+                // Find the source path (same logic as loadModuleInterface)
+                std::string modSrcPath = srcDir + "/" + modName + ".Mod";
+                if (std::filesystem::exists(modSrcPath)) {
+                    std::string modObj = compileToObject(modSrcPath);
+                    allObjs.push_back(modObj);
+                    tempObjs.push_back(modObj);
+                }
+            }
+
+            link(allObjs, exePath);
+
+            std::filesystem::remove(objPath);
+            for (auto& t : tempObjs) std::filesystem::remove(t);
+            std::cout << "OK: '" << srcPath << "' → '" << exePath << "'\n";
+        }
 
     } catch (const ParseError& e) {
         std::cerr << "parse error: " << e.what() << "\n";

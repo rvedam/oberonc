@@ -35,6 +35,14 @@ public:
     void generate(const Module& mod);
     void writeIR(const std::string& path);
     void writeIR(llvm::raw_ostream& os);
+    void writeObject(const std::string& path); // emit native object file
+    void setModulePaths(const std::vector<std::string>& paths) { modulePaths_ = paths; }
+    void setModuleInitOnly(bool v) { moduleInitOnly_ = v; }
+
+    // Names of user modules that were successfully loaded (alias → modName)
+    const std::vector<std::pair<std::string,std::string>>& loadedUserModules() const {
+        return loadedUserModules_;
+    }
 
 private:
     // ---- LLVM context ----
@@ -47,6 +55,11 @@ private:
     std::set<std::string>                   importedModules_;
     std::map<std::string, OberonTypePtr>    typeTable_;
     std::map<OberonType*, llvm::Type*>      llvmTypeCache_;
+
+    // ---- Module search paths (for resolving imports) ----
+    std::vector<std::string>                modulePaths_;
+    std::vector<std::pair<std::string,std::string>> loadedUserModules_; // (alias, modName)
+    bool                                    moduleInitOnly_ = false; // generate ModName_init instead of oberon_main
 
     // ---- Symbol table ----
     struct Symbol {
@@ -85,6 +98,7 @@ private:
     // Declaration generation
     // ----------------------------------------------------------------
     void genImports   (const std::vector<ImportEntry>& imports);
+    void loadModuleInterface(const std::string& alias, const std::string& modName);
     void genConstDecls(const std::vector<ConstDecl>&   decls, bool global);
     void genVarDecls  (const std::vector<VarDecl>&     decls, bool global);
     void declareProcs (const std::vector<std::shared_ptr<ProcDecl>>& procs);

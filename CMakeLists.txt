@@ -13,7 +13,7 @@ find_package(LLVM 14 REQUIRED CONFIG
 message(STATUS "LLVM version: ${LLVM_PACKAGE_VERSION}")
 message(STATUS "LLVM include dir: ${LLVM_INCLUDE_DIRS}")
 llvm_map_components_to_libnames(LLVM_LIBS
-    core support irreader passes nativecodegen)
+    core support irreader passes nativecodegen mc asmprinter)
 
 # LLVM headers use C++14 feature macros; suppress the warning about exceptions
 # being disabled (we keep exceptions enabled in our own code).
@@ -43,6 +43,9 @@ add_library(oberon_runtime STATIC runtime/oberon_runtime.cpp)
 # ---- Compiler driver -------------------------------------------------------
 add_executable(oberonc src/main.cpp)
 target_link_libraries(oberonc PRIVATE oberonc_codegen oberon_runtime)
+# Pass the runtime library path so the compiler can link user programs
+target_compile_definitions(oberonc PRIVATE
+    OBERON_RUNTIME_LIB="$<TARGET_FILE:oberon_runtime>")
 
 # ---- Optional: AddressSanitizer -------------------------------------------
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
