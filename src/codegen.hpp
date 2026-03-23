@@ -60,6 +60,7 @@ private:
     std::vector<std::string>                modulePaths_;
     std::vector<std::pair<std::string,std::string>> loadedUserModules_; // (alias, modName)
     bool                                    moduleInitOnly_ = false; // generate ModName_init instead of oberon_main
+    std::string                             sysAlias_;  // alias used to import SYSTEM (usually "SYSTEM")
 
     // ---- Symbol table ----
     struct Symbol {
@@ -112,6 +113,7 @@ private:
     void genStmt  (const Stmt&    s);
     void genAssign(const AssignStmt&    s);
     void genCall  (const ProcCallStmt&  s);
+    void genSysCall(const ProcCallStmt& s);   // SYSTEM proper-procedure intrinsics
     void genIf    (const IfStmt&        s);
     void genCase  (const CaseStmt&      s);
     void genWhile (const WhileStmt&     s);
@@ -123,9 +125,14 @@ private:
     // ----------------------------------------------------------------
     struct AddrResult { llvm::Value* addr; OberonTypePtr type; };
 
-    llvm::Value* genExpr   (const Expr&       e);
-    AddrResult   genAddr   (const Designator& d);
-    llvm::Value* genCallVal(const DesignatorExpr& de);  // call as expression
+    llvm::Value* genExpr      (const Expr&       e);
+    AddrResult   genAddr      (const Designator& d);
+    llvm::Value* genCallVal   (const DesignatorExpr& de);   // call as expression
+    llvm::Value* genSysCallVal(const DesignatorExpr& de);   // SYSTEM function intrinsics
+
+    // Returns the resolved OberonType if expr is a bare type-name designator
+    // (used by SYSTEM.SIZE and SYSTEM.VAL), otherwise nullptr.
+    OberonTypePtr tryGetTypeArg(const Expr& e);
 
     // ----------------------------------------------------------------
     // Helpers

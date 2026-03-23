@@ -257,8 +257,181 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
 // -----------------------------------------------------------------------
 // Procedure call as an expression (returns the call's value)
 // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// SYSTEM module intrinsics — function procedures (return a value)
+// -----------------------------------------------------------------------
+OberonTypePtr CodeGen::tryGetTypeArg(const Expr& e) {
+    auto* de = dynamic_cast<const DesignatorExpr*>(&e);
+    if (!de || de->args.has_value() || !de->desig->selectors.empty()
+            || !de->desig->module.empty())
+        return nullptr;
+    auto it = typeTable_.find(de->desig->ident);
+    return (it != typeTable_.end()) ? it->second : nullptr;
+}
+
+llvm::Value* CodeGen::genSysCallVal(const DesignatorExpr& de) {
+    auto& d    = *de.desig;
+    auto& args = *de.args;
+    auto* i64  = llvm::Type::getInt64Ty(ctx_);
+    auto* i32  = llvm::Type::getInt32Ty(ctx_);
+    auto* i8p  = llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0);
+
+    // ADR(v) → INTEGER  — address of variable v
+    if (d.ident == "ADR") {
+        if (args.size() != 1) error("SYSTEM.ADR requires one argument");
+        auto* de2 = dynamic_cast<const DesignatorExpr*>(args[0].get());
+        if (!de2 || de2->args.has_value())
+            error("SYSTEM.ADR argument must be a variable");
+        auto [addr, _] = genAddr(*de2->desig);
+        return b_->CreatePtrToInt(addr, i64, "adr");
+    }
+
+    // SIZE(T) → INTEGER  — byte size of type T (compile-time constant)
+    if (d.ident == "SIZE") {
+        if (args.size() != 1) error("SYSTEM.SIZE requires one argument");
+        OberonTypePtr ot = tryGetTypeArg(*args[0]);
+        if (!ot) error("SYSTEM.SIZE argument must be a type name");
+        llvm::DataLayout DL(llvmMod_.get());
+        uint64_t sz = DL.getTypeAllocSize(toLLVM(ot));
+        return llvm::ConstantInt::get(i64, sz);
+    }
+
+    // BIT(a, n) → BOOLEAN  — n-th bit of the word at address a
+    if (d.ident == "BIT") {
+        if (args.size() != 2) error("SYSTEM.BIT requires two arguments");
+        auto* a   = coerce(genExpr(*args[0]), i64);
+        auto* n   = coerce(genExpr(*args[1]), i32);
+        auto* ptr = b_->CreateIntToPtr(a, llvm::PointerType::get(i32, 0));
+        auto* word = b_->CreateLoad(i32, ptr, "bit.word");
+        auto* shifted = b_->CreateLShr(word, n, "bit.sh");
+        auto* bit  = b_->CreateAnd(shifted, llvm::ConstantInt::get(i32, 1));
+        return b_->CreateICmpNE(bit, llvm::ConstantInt::get(i32, 0), "bit");
+    }
+
+    // VAL(T, x) → T  — type reinterpretation (bitcast / ptr↔int cast)
+    if (d.ident == "VAL") {
+        if (args.size() != 2) error("SYSTEM.VAL requires two arguments");
+        OberonTypePtr targetOT = tryGetTypeArg(*args[0]);
+        if (!targetOT) error("SYSTEM.VAL first argument must be a type name");
+        llvm::Type*  tgt = toLLVM(targetOT);
+        llvm::Value* src = genExpr(*args[1]);
+        if (src->getType() == tgt) return src;
+        if (src->getType()->isIntegerTy() && tgt->isIntegerTy())
+            return b_->CreateIntCast(src, tgt, /*isSigned=*/true, "val");
+        if (src->getType()->isIntegerTy() && tgt->isPointerTy())
+            return b_->CreateIntToPtr(src, tgt, "val");
+        if (src->getType()->isPointerTy() && tgt->isIntegerTy())
+            return b_->CreatePtrToInt(src, tgt, "val");
+        return b_->CreateBitCast(src, tgt, "val");
+    }
+
+    // ADC(m, n) → INTEGER  — add with carry (stub: plain add on x86-64)
+    if (d.ident == "ADC") {
+        if (args.size() != 2) error("SYSTEM.ADC requires two arguments");
+        return b_->CreateAdd(coerce(genExpr(*args[0]), i64),
+                             coerce(genExpr(*args[1]), i64), "adc");
+    }
+
+    // SBC(m, n) → INTEGER  — subtract with carry (stub: plain sub on x86-64)
+    if (d.ident == "SBC") {
+        if (args.size() != 2) error("SYSTEM.SBC requires two arguments");
+        return b_->CreateSub(coerce(genExpr(*args[0]), i64),
+                             coerce(genExpr(*args[1]), i64), "sbc");
+    }
+
+    // UML(m, n) → INTEGER  — upper 32 bits of unsigned 64-bit product
+    if (d.ident == "UML") {
+        if (args.size() != 2) error("SYSTEM.UML requires two arguments");
+        auto* m  = b_->CreateZExtOrTrunc(genExpr(*args[0]), i64);
+        auto* n  = b_->CreateZExtOrTrunc(genExpr(*args[1]), i64);
+        auto* pr = b_->CreateMul(m, n, "uml");
+        return b_->CreateAShr(pr, llvm::ConstantInt::get(i64, 32), "uml.hi");
+    }
+
+    // COND(n) → BOOLEAN  — condition code test (stub: FALSE on x86-64)
+    if (d.ident == "COND") {
+        return llvm::ConstantInt::getFalse(ctx_);
+    }
+
+    // H(n) → INTEGER  — hardware register H (RISC-specific; stub 0)
+    if (d.ident == "H") {
+        return llvm::ConstantInt::get(i64, 0);
+    }
+
+    // REG(n) → INTEGER  — CPU register read (stub: 0 on hosted x86-64)
+    if (d.ident == "REG") {
+        return llvm::ConstantInt::get(i64, 0);
+    }
+
+    (void)i8p;
+    error("unknown SYSTEM function: " + d.ident);
+}
+
+// -----------------------------------------------------------------------
+// SYSTEM module intrinsics — proper procedures (no return value)
+// -----------------------------------------------------------------------
+void CodeGen::genSysCall(const ProcCallStmt& s) {
+    auto& d    = *s.desig;
+    auto& args = *s.args;
+    auto* i64  = llvm::Type::getInt64Ty(ctx_);
+    auto* i8p  = llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0);
+
+    // GET(a, v)  —  v := mem[a]
+    if (d.ident == "GET") {
+        if (args.size() != 2) error("SYSTEM.GET requires two arguments");
+        auto* addr  = coerce(genExpr(*args[0]), i64);
+        // Second arg must be a variable (we need its type and address)
+        auto* de2 = dynamic_cast<const DesignatorExpr*>(args[1].get());
+        if (!de2 || de2->args.has_value())
+            error("SYSTEM.GET second argument must be a variable");
+        auto [varAddr, varTy] = genAddr(*de2->desig);
+        llvm::Type* lt  = toLLVM(varTy);
+        auto* ptr = b_->CreateIntToPtr(addr, llvm::PointerType::get(lt, 0));
+        auto* val = b_->CreateLoad(lt, ptr, "get");
+        b_->CreateStore(val, varAddr);
+        return;
+    }
+
+    // PUT(a, x)  —  mem[a] := x
+    if (d.ident == "PUT") {
+        if (args.size() != 2) error("SYSTEM.PUT requires two arguments");
+        auto* addr = coerce(genExpr(*args[0]), i64);
+        auto* val  = genExpr(*args[1]);
+        auto* ptr  = b_->CreateIntToPtr(
+            addr, llvm::PointerType::get(val->getType(), 0));
+        b_->CreateStore(val, ptr);
+        return;
+    }
+
+    // COPY(src, dst, n)  —  copy n bytes from address src to dst
+    if (d.ident == "COPY") {
+        if (args.size() != 3) error("SYSTEM.COPY requires three arguments");
+        auto* src   = b_->CreateIntToPtr(coerce(genExpr(*args[0]), i64), i8p);
+        auto* dst   = b_->CreateIntToPtr(coerce(genExpr(*args[1]), i64), i8p);
+        auto* nbytes = coerce(genExpr(*args[2]), i64);
+        b_->CreateMemCpy(dst, llvm::MaybeAlign(1),
+                         src, llvm::MaybeAlign(1), nbytes);
+        return;
+    }
+
+    // LED(n)  —  display n on LEDs (RISC-specific; no-op on x86-64)
+    if (d.ident == "LED") { return; }
+
+    // LDREG(n, v)  —  write CPU register (stub: no-op on hosted x86-64)
+    if (d.ident == "LDREG") { return; }
+
+    error("unknown SYSTEM procedure: " + d.ident);
+}
+
+// -----------------------------------------------------------------------
+// Procedure call as an expression (returns the call's value)
+// -----------------------------------------------------------------------
 llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
     auto& d = *de.desig;
+
+    // Dispatch SYSTEM function intrinsics
+    if (!sysAlias_.empty() && d.module == sysAlias_)
+        return genSysCallVal(de);
 
     // Resolve function
     llvm::Function* fn = nullptr;
@@ -343,6 +516,12 @@ void CodeGen::genAssign(const AssignStmt& s) {
 // ProcedureCall = designator [ActualParameters]
 void CodeGen::genCall(const ProcCallStmt& s) {
     auto& d = *s.desig;
+
+    // SYSTEM proper-procedure intrinsics
+    if (!sysAlias_.empty() && d.module == sysAlias_ && s.args) {
+        genSysCall(s);
+        return;
+    }
 
     // NEW(p)  –  built-in procedure
     if (d.module.empty() && d.ident == "NEW" && s.args && s.args->size() == 1) {

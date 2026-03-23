@@ -403,6 +403,10 @@ void CodeGen::genImports(const std::vector<ImportEntry>& imports) {
             decl("In_Char", llvm::FunctionType::get(voidTy,
                 {llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0)}, false));
         }
+        // SYSTEM: all procedures are compiler intrinsics — no runtime declarations
+        else if (mod == "SYSTEM") {
+            sysAlias_ = modAlias;
+        }
         // Other (user-defined) modules: parse source and declare exported procs
         else {
             loadModuleInterface(modAlias, mod);
