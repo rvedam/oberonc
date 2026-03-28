@@ -75,52 +75,97 @@ include(CTest)
 include(Catch)
 catch_discover_tests(oberonc_tests)
 
-# ---- Freestanding (bare-metal) runtime libraries --------------------------
+# ---- Architecture selection for bare-metal targets --------------------------
+set(KERNEL_ARCH "x86_64" CACHE STRING
+    "Target architecture for bare-metal kernel (x86_64 or aarch64)")
+set_property(CACHE KERNEL_ARCH PROPERTY STRINGS x86_64 aarch64)
+message(STATUS "Bare-metal kernel architecture: ${KERNEL_ARCH}")
 
-add_library(oberon_runtime_x86_64 STATIC
-    runtime/oberon_runtime_bare.cpp
-    runtime/platform/x86_64/hal.cpp)
-target_include_directories(oberon_runtime_x86_64 PUBLIC runtime)
-target_compile_options(oberon_runtime_x86_64 PRIVATE
-    -ffreestanding -mno-red-zone -O2)
+if(KERNEL_ARCH STREQUAL "x86_64")
 
-add_library(oberon_runtime_aarch64 STATIC
-    runtime/oberon_runtime_bare.cpp
-    runtime/platform/aarch64/hal.cpp)
-target_include_directories(oberon_runtime_aarch64 PUBLIC runtime)
-target_compile_options(oberon_runtime_aarch64 PRIVATE -ffreestanding -O2)
+    # Runtime library — host compiler is correct for x86_64
+    add_library(oberon_runtime_bare STATIC
+        runtime/oberon_runtime_bare.cpp
+        runtime/platform/x86_64/hal.cpp)
+    target_include_directories(oberon_runtime_bare PUBLIC runtime)
+    target_compile_options(oberon_runtime_bare PRIVATE
+        -ffreestanding -mno-red-zone -O2)
 
-# ---- Boot object files (assembled by the C compiler) ----------------------
+    # Boot stub — assembled by the host assembler
+    add_library(boot_bare OBJECT runtime/boot/x86_64/boot.S)
+    target_compile_options(boot_bare PRIVATE -ffreestanding)
 
-add_library(boot_x86_64  OBJECT runtime/boot/x86_64/boot.S)
-target_compile_options(boot_x86_64  PRIVATE -ffreestanding)
+    add_custom_target(kernel
+        COMMAND llc-14 --march=x86-64 --filetype=obj
+                ${CMAKE_SOURCE_DIR}/tests/Hello.ll -o ${CMAKE_BINARY_DIR}/hello.o
+        COMMAND ld -m elf_x86_64
+                -T ${CMAKE_SOURCE_DIR}/runtime/boot/x86_64/kernel.ld
+                $<TARGET_OBJECTS:boot_bare>
+                ${CMAKE_BINARY_DIR}/hello.o
+                $<TARGET_FILE:oberon_runtime_bare>
+                -o ${CMAKE_BINARY_DIR}/kernel_x86_64.elf
+        DEPENDS boot_bare oberon_runtime_bare
+        COMMENT "Linking x86-64 bare-metal kernel → kernel_x86_64.elf")
 
-add_library(boot_aarch64 OBJECT runtime/boot/aarch64/boot.S)
-target_compile_options(boot_aarch64 PRIVATE -ffreestanding)
+elseif(KERNEL_ARCH STREQUAL "aarch64")
 
-# ---- Bare-metal kernel link targets ---------------------------------------
-# These use add_custom_target so CMake does not inject CRT objects.
+    # Cross-compiler toolchain — override with -DAARCH64_CC= etc. if needed
+    set(AARCH64_CC  "aarch64-linux-gnu-gcc"  CACHE STRING "AArch64 C compiler")
+    set(AARCH64_CXX "aarch64-linux-gnu-g++"  CACHE STRING "AArch64 C++ compiler")
+    set(AARCH64_LD  "aarch64-linux-gnu-ld"   CACHE STRING "AArch64 linker")
 
-add_custom_target(kernel_x86_64
-    COMMAND llc-14 --march=x86-64 --filetype=obj
-            ${CMAKE_SOURCE_DIR}/tests/Hello.ll -o ${CMAKE_BINARY_DIR}/hello_x86.o
-    COMMAND ld -m elf_x86_64
-            -T ${CMAKE_SOURCE_DIR}/runtime/boot/x86_64/kernel.ld
-            $<TARGET_OBJECTS:boot_x86_64>
-            ${CMAKE_BINARY_DIR}/hello_x86.o
-            $<TARGET_FILE:oberon_runtime_x86_64>
-            -o ${CMAKE_BINARY_DIR}/kernel_x86_64.elf
-    DEPENDS boot_x86_64 oberon_runtime_x86_64
-    COMMENT "Linking x86-64 bare-metal kernel")
+    # Runtime objects — must be built with the cross-compiler
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
+        COMMAND ${AARCH64_CXX} -std=c++20 -ffreestanding -O2
+                -I${CMAKE_SOURCE_DIR}/runtime
+                -c ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
+                -o ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
+        COMMENT "Cross-compiling AArch64 bare runtime")
 
-add_custom_target(kernel_aarch64
-    COMMAND llc --march=aarch64 --filetype=obj
-            ${CMAKE_SOURCE_DIR}/tests/Hello.ll -o ${CMAKE_BINARY_DIR}/hello_aa64.o
-    COMMAND aarch64-linux-gnu-ld
-            -T ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/kernel.ld
-            $<TARGET_OBJECTS:boot_aarch64>
-            ${CMAKE_BINARY_DIR}/hello_aa64.o
-            $<TARGET_FILE:oberon_runtime_aarch64>
-            -o ${CMAKE_BINARY_DIR}/kernel_aarch64.elf
-    DEPENDS boot_aarch64 oberon_runtime_aarch64
-    COMMENT "Linking AArch64 bare-metal kernel")
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/hal.o
+        COMMAND ${AARCH64_CXX} -std=c++20 -ffreestanding -O2
+                -I${CMAKE_SOURCE_DIR}/runtime
+                -c ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
+                -o ${CMAKE_BINARY_DIR}/hal.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
+        COMMENT "Cross-compiling AArch64 HAL")
+
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
+        COMMAND ${CMAKE_AR} rcs
+                ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
+                ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
+                ${CMAKE_BINARY_DIR}/hal.o
+        DEPENDS ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
+                ${CMAKE_BINARY_DIR}/hal.o
+        COMMENT "Archiving AArch64 runtime library")
+
+    # Boot stub — must be assembled by the cross-assembler
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/boot.o
+        COMMAND ${AARCH64_CC} -ffreestanding
+                -c ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/boot.S
+                -o ${CMAKE_BINARY_DIR}/boot.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/boot.S
+        COMMENT "Cross-assembling AArch64 boot stub")
+
+    add_custom_target(kernel
+        COMMAND llc --march=aarch64 --filetype=obj
+                ${CMAKE_SOURCE_DIR}/tests/Hello.ll -o ${CMAKE_BINARY_DIR}/hello.o
+        COMMAND ${AARCH64_LD}
+                -T ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/kernel.ld
+                ${CMAKE_BINARY_DIR}/boot.o
+                ${CMAKE_BINARY_DIR}/hello.o
+                ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
+                -o ${CMAKE_BINARY_DIR}/kernel_aarch64.elf
+        DEPENDS ${CMAKE_BINARY_DIR}/boot.o
+                ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
+        COMMENT "Linking AArch64 bare-metal kernel → kernel_aarch64.elf")
+
+else()
+    message(FATAL_ERROR
+        "Unknown KERNEL_ARCH '${KERNEL_ARCH}'. Valid values: x86_64, aarch64")
+endif()

@@ -77,20 +77,26 @@ Boot sequence in both architectures: `_start` → `hal_init()` → `oberon_main(
 
 ### CMake targets
 
+Select the target architecture at configure time with `-DKERNEL_ARCH=` (default: `x86_64`):
+
 ```bash
-# Build x86-64 kernel ELF (links Hello.ll by default)
-cmake --build build --target kernel_x86_64
+# x86-64 kernel (default)
+cmake -B build -DKERNEL_ARCH=x86_64
+cmake --build build --target kernel
 # Output: build/kernel_x86_64.elf
 
-# Build AArch64 kernel ELF (requires aarch64-linux-gnu-ld)
-cmake --build build --target kernel_aarch64
+# AArch64 kernel (requires aarch64-linux-gnu-{gcc,g++,ld})
+cmake -B build -DKERNEL_ARCH=aarch64
+cmake --build build --target kernel
 # Output: build/kernel_aarch64.elf
+
+# Override cross-compiler paths if needed
+cmake -B build -DKERNEL_ARCH=aarch64 \
+      -DAARCH64_CXX=/opt/cross/bin/aarch64-elf-g++ \
+      -DAARCH64_LD=/opt/cross/bin/aarch64-elf-ld
 ```
 
-The `kernel_x86_64` target assembles `tests/Hello.ll` via `llc-14`, then links:
-`boot_x86_64.o` + `hello_x86.o` + `liboberon_runtime_x86_64.a`
-
-The `kernel_aarch64` target assembles via `llc --march=aarch64`, then links with `aarch64-linux-gnu-ld`.
+The `kernel` target assembles `tests/Hello.ll` with `llc`/`llc-14`, links the boot stub and the bare runtime library for the selected architecture.
 
 ### Running with QEMU
 
