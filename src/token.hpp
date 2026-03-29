@@ -10,6 +10,7 @@ enum class TokenKind {
     Integer,   // decimal or 0..9{hexDigit}H
     Real,      // digit{digit}.{digit}[ScaleFactor]
     String,    // "..." or digit{hexDigit}X
+    HexStr,    // $hh hh ...$ — Project Oberon inline byte array literal
 
     // Keywords (alphabetical)
     Array, Begin, By, Case, Const,

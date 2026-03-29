@@ -51,6 +51,7 @@ const char* tokenKindName(TokenKind k) {
     case TokenKind::Integer:   return "integer literal";
     case TokenKind::Real:      return "real literal";
     case TokenKind::String:    return "string literal";
+    case TokenKind::HexStr:    return "hex byte literal";
     case TokenKind::Array:     return "ARRAY";
     case TokenKind::Begin:     return "BEGIN";
     case TokenKind::By:        return "BY";
@@ -306,6 +307,23 @@ Token Lexer::next() {
     // String literal
     if (c == '"')
         return scanString();
+
+    // Hex byte array literal: $hh hh ...$ (Project Oberon extension)
+    if (c == '$') {
+        advance(); // consume opening '$'
+        std::string text;
+        while (!atEnd() && peek() != '$') {
+            char ch = advance();
+            if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r')
+                text += ch;
+        }
+        if (atEnd())
+            throw std::runtime_error(
+                filename_ + ":" + std::to_string(l.line) + ":" +
+                std::to_string(l.column) + ": unterminated hex byte literal");
+        advance(); // consume closing '$'
+        return makeToken(TokenKind::HexStr, text, l);
+    }
 
     // Multi-character and single-character operators
     advance();   // consume c

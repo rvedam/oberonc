@@ -344,6 +344,12 @@ ExprPtr Parser::parseFactor() {
         n->loc = l; n->raw = advance().text;
         return n;
     }
+    case TokenKind::HexStr: {
+        // $hh hh ...$ byte array literal — only valid as argument to SYSTEM.ADR
+        auto n = std::make_unique<StringLitExpr>();
+        n->loc = l; n->raw = "$" + advance().text + "$";
+        return n;
+    }
     case TokenKind::Nil: {
         advance();
         auto n = std::make_unique<NilExpr>(); n->loc = l; return n;

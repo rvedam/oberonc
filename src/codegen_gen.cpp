@@ -4,6 +4,7 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/Intrinsics.h>
 
 // -----------------------------------------------------------------------
 // Type-of helper  (used to know which LLVM ops to emit)
@@ -277,11 +278,52 @@ llvm::Value* CodeGen::genSysCallVal(const DesignatorExpr& de) {
     auto* i8p  = llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0);
 
     // ADR(v) → INTEGER  — address of variable v
+    // ADR($hh hh...$) → INTEGER — address of inline byte array constant
     if (d.ident == "ADR") {
         if (args.size() != 1) error("SYSTEM.ADR requires one argument");
+        // Check for hex byte literal: StringLitExpr with $..$ delimiters
+        if (auto* sl = dynamic_cast<const StringLitExpr*>(args[0].get())) {
+            const std::string& raw = sl->raw;
+            if (raw.size() >= 2 && raw.front() == '$' && raw.back() == '$') {
+                // Decode hex pairs from the raw content (delimiters already stripped
+                // to leave only hex digits by the lexer, then re-wrapped by parser)
+                std::string_view hex(raw.data() + 1, raw.size() - 2);
+                std::vector<uint8_t> bytes;
+                for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+                    auto hexval = [](char c) -> uint8_t {
+                        if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+                        if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
+                        if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+                        return 0;
+                    };
+                    bytes.push_back(static_cast<uint8_t>(hexval(hex[i]) * 16 + hexval(hex[i+1])));
+                }
+                auto* i8t = llvm::Type::getInt8Ty(ctx_);
+                auto* arrTy = llvm::ArrayType::get(i8t, bytes.size());
+                std::vector<llvm::Constant*> elems;
+                elems.reserve(bytes.size());
+                for (uint8_t b : bytes)
+                    elems.push_back(llvm::ConstantInt::get(i8t, b));
+                auto* cArr = llvm::ConstantArray::get(arrTy, elems);
+                auto* gv = new llvm::GlobalVariable(
+                    *llvmMod_, arrTy, /*isConst=*/true,
+                    llvm::GlobalValue::PrivateLinkage, cArr, ".hexbytes");
+                auto* i8p = llvm::PointerType::get(i8t, 0);
+                auto* ptr = b_->CreateBitCast(gv, i8p);
+                return b_->CreatePtrToInt(ptr, i64, "adr");
+            }
+        }
         auto* de2 = dynamic_cast<const DesignatorExpr*>(args[0].get());
         if (!de2 || de2->args.has_value())
-            error("SYSTEM.ADR argument must be a variable");
+            error("SYSTEM.ADR argument must be a variable, procedure, or hex byte literal");
+        // Allow SYSTEM.ADR(Proc) — get the address of a local procedure
+        if (de2->desig->selectors.empty() && de2->desig->module.empty()) {
+            std::string fname = modName_ + "_" + de2->desig->ident;
+            if (auto* fn = llvmMod_->getFunction(fname)) {
+                auto* fptr = b_->CreateBitCast(fn, i8p);
+                return b_->CreatePtrToInt(fptr, i64, "adr");
+            }
+        }
         auto [addr, _] = genAddr(*de2->desig);
         return b_->CreatePtrToInt(addr, i64, "adr");
     }
@@ -433,6 +475,91 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
     if (!sysAlias_.empty() && d.module == sysAlias_)
         return genSysCallVal(de);
 
+    // Built-in function procedures
+    if (d.module.empty() && de.args) {
+        auto& args = *de.args;
+        auto* i64 = llvm::Type::getInt64Ty(ctx_);
+        auto* dbl = llvm::Type::getDoubleTy(ctx_);
+
+        // ABS(x) — absolute value (integer or real)
+        if (d.ident == "ABS" && args.size() == 1) {
+            auto* v = genExpr(*args[0]);
+            if (v->getType()->isDoubleTy()) {
+                auto* fn = llvm::Intrinsic::getDeclaration(
+                    llvmMod_.get(), llvm::Intrinsic::fabs, {dbl});
+                return b_->CreateCall(fn, {v});
+            }
+            auto* vi = coerce(v, i64);
+            auto* fn = llvm::Intrinsic::getDeclaration(
+                llvmMod_.get(), llvm::Intrinsic::abs, {i64});
+            return b_->CreateCall(fn, {vi, llvm::ConstantInt::getFalse(ctx_)});
+        }
+
+        // ODD(x) — x MOD 2 # 0
+        if (d.ident == "ODD" && args.size() == 1) {
+            auto* v = coerce(genExpr(*args[0]), i64);
+            auto* bit = b_->CreateAnd(v, llvm::ConstantInt::get(i64, 1));
+            return b_->CreateICmpNE(bit, llvm::ConstantInt::get(i64, 0));
+        }
+
+        // LEN(a) — compile-time array length
+        if (d.ident == "LEN" && !args.empty()) {
+            if (auto* de0 = dynamic_cast<const DesignatorExpr*>(args[0].get())) {
+                if (!de0->args) {
+                    auto [addr, ty] = genAddr(*de0->desig);
+                    (void)addr;
+                    if (ty && ty->kind == TypeKind::Array && !ty->isOpen)
+                        return llvm::ConstantInt::get(i64, ty->length);
+                }
+            }
+            error("LEN: argument must be a fixed-length array variable");
+        }
+
+        // ORD(c) — ordinal of CHAR or BOOLEAN
+        if (d.ident == "ORD" && args.size() == 1)
+            return coerce(genExpr(*args[0]), i64);
+
+        // CHR(x) — CHAR from integer
+        if (d.ident == "CHR" && args.size() == 1)
+            return coerce(genExpr(*args[0]), llvm::Type::getInt8Ty(ctx_));
+
+        // FLOOR(x) — floor of REAL, result INTEGER
+        if (d.ident == "FLOOR" && args.size() == 1) {
+            auto* v = genExpr(*args[0]);
+            auto* fn = llvm::Intrinsic::getDeclaration(
+                llvmMod_.get(), llvm::Intrinsic::floor, {dbl});
+            return b_->CreateFPToSI(b_->CreateCall(fn, {v}), i64);
+        }
+
+        // FLT(x) — REAL from integer
+        if (d.ident == "FLT" && args.size() == 1)
+            return b_->CreateSIToFP(coerce(genExpr(*args[0]), i64), dbl);
+
+        // ROR(x, n) — rotate right
+        if (d.ident == "ROR" && args.size() == 2) {
+            auto* x     = coerce(genExpr(*args[0]), i64);
+            auto* n     = coerce(genExpr(*args[1]), i64);
+            auto* count = b_->CreateURem(n, llvm::ConstantInt::get(i64, 64));
+            auto* fn    = llvm::Intrinsic::getDeclaration(
+                llvmMod_.get(), llvm::Intrinsic::fshr, {i64});
+            return b_->CreateCall(fn, {x, x, count});
+        }
+
+        // LSL(x, n) — logical shift left
+        if (d.ident == "LSL" && args.size() == 2) {
+            auto* x = coerce(genExpr(*args[0]), i64);
+            auto* n = coerce(genExpr(*args[1]), i64);
+            return b_->CreateShl(x, n);
+        }
+
+        // ASR(x, n) — arithmetic shift right
+        if (d.ident == "ASR" && args.size() == 2) {
+            auto* x = coerce(genExpr(*args[0]), i64);
+            auto* n = coerce(genExpr(*args[1]), i64);
+            return b_->CreateAShr(x, n);
+        }
+    }
+
     // Resolve function
     llvm::Function* fn = nullptr;
     if (!d.module.empty() && importedModules_.count(d.module)) {
@@ -522,6 +649,79 @@ void CodeGen::genCall(const ProcCallStmt& s) {
         genSysCall(s);
         return;
     }
+
+    // INC(v) / INC(v, n)  —  v := v + 1  or  v := v + n
+    if (d.module.empty() && d.ident == "INC" && s.args && !s.args->empty()) {
+        auto* de0 = dynamic_cast<const DesignatorExpr*>(s.args->at(0).get());
+        if (!de0 || de0->args.has_value()) error("INC: first argument must be a variable");
+        auto [addr, ty] = genAddr(*de0->desig);
+        auto* lt  = toLLVM(ty);
+        auto* cur = b_->CreateLoad(lt, addr);
+        auto* delta = s.args->size() >= 2
+            ? coerce(genExpr(*s.args->at(1)), lt)
+            : llvm::ConstantInt::get(lt, 1);
+        b_->CreateStore(b_->CreateAdd(cur, delta), addr);
+        return;
+    }
+
+    // DEC(v) / DEC(v, n)  —  v := v - 1  or  v := v - n
+    if (d.module.empty() && d.ident == "DEC" && s.args && !s.args->empty()) {
+        auto* de0 = dynamic_cast<const DesignatorExpr*>(s.args->at(0).get());
+        if (!de0 || de0->args.has_value()) error("DEC: first argument must be a variable");
+        auto [addr, ty] = genAddr(*de0->desig);
+        auto* lt  = toLLVM(ty);
+        auto* cur = b_->CreateLoad(lt, addr);
+        auto* delta = s.args->size() >= 2
+            ? coerce(genExpr(*s.args->at(1)), lt)
+            : llvm::ConstantInt::get(lt, 1);
+        b_->CreateStore(b_->CreateSub(cur, delta), addr);
+        return;
+    }
+
+    // INCL(s, e)  —  s := s + {e}   (set bit e in the SET variable s)
+    if (d.module.empty() && d.ident == "INCL" && s.args && s.args->size() >= 2) {
+        auto* de0 = dynamic_cast<const DesignatorExpr*>(s.args->at(0).get());
+        if (!de0 || de0->args.has_value()) error("INCL: first argument must be a SET variable");
+        auto [addr, ty] = genAddr(*de0->desig);
+        auto* i64 = llvm::Type::getInt64Ty(ctx_);
+        auto* cur = coerce(b_->CreateLoad(toLLVM(ty), addr), i64);
+        auto* bit = b_->CreateShl(llvm::ConstantInt::get(i64, 1),
+                                   coerce(genExpr(*s.args->at(1)), i64));
+        b_->CreateStore(b_->CreateOr(cur, bit), addr);
+        return;
+    }
+
+    // EXCL(s, e)  —  s := s - {e}   (clear bit e in the SET variable s)
+    if (d.module.empty() && d.ident == "EXCL" && s.args && s.args->size() >= 2) {
+        auto* de0 = dynamic_cast<const DesignatorExpr*>(s.args->at(0).get());
+        if (!de0 || de0->args.has_value()) error("EXCL: first argument must be a SET variable");
+        auto [addr, ty] = genAddr(*de0->desig);
+        auto* i64 = llvm::Type::getInt64Ty(ctx_);
+        auto* cur = coerce(b_->CreateLoad(toLLVM(ty), addr), i64);
+        auto* bit = b_->CreateShl(llvm::ConstantInt::get(i64, 1),
+                                   coerce(genExpr(*s.args->at(1)), i64));
+        b_->CreateStore(b_->CreateAnd(cur, b_->CreateNot(bit)), addr);
+        return;
+    }
+
+    // ASSERT(cond)  —  halt if condition is false
+    if (d.module.empty() && d.ident == "ASSERT" && s.args && !s.args->empty()) {
+        auto* cond = genExpr(*s.args->at(0));
+        if (!cond->getType()->isIntegerTy(1))
+            cond = b_->CreateICmpNE(cond, llvm::Constant::getNullValue(cond->getType()));
+        auto* failBB = llvm::BasicBlock::Create(ctx_, "assert.fail", curFunc_);
+        auto* contBB = llvm::BasicBlock::Create(ctx_, "assert.ok",   curFunc_);
+        b_->CreateCondBr(cond, contBB, failBB);
+        b_->SetInsertPoint(failBB);
+        auto it = extFuncs_.find("Oberon_Trap");
+        if (it != extFuncs_.end()) b_->CreateCall(it->second, {});
+        b_->CreateUnreachable();
+        b_->SetInsertPoint(contBB);
+        return;
+    }
+
+    // LED(n)  —  RISC-specific display; no-op on x86-64
+    if (d.module.empty() && d.ident == "LED") { return; }
 
     // NEW(p)  –  built-in procedure
     if (d.module.empty() && d.ident == "NEW" && s.args && s.args->size() == 1) {

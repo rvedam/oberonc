@@ -85,6 +85,12 @@ void In_Char(char* c) {
 // Heap allocation (used by NEW built-in)
 // ---------------------------------------------------------------------------
 
+// Oberon_Trap() — called by ASSERT on failure; terminates the program.
+[[noreturn]] void Oberon_Trap() {
+    std::fputs("Oberon runtime: assertion failed\n", stderr);
+    std::abort();
+}
+
 // Oberon_NEW(size) — allocate `size` zero-initialised bytes; abort on OOM.
 void* Oberon_NEW(int64_t size) {
     if (size <= 0) size = 1;

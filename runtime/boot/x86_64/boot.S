@@ -1,11 +1,25 @@
-/* x86-64 boot stub: multiboot2 header + 32→64 mode switch */
+/* x86-64 boot stub: multiboot2 header + 32→64 mode switch
+ *
+ * Boot sequence
+ * ─────────────
+ * 1. GRUB drops us here in 32-bit protected mode with a flat 4 GiB segment.
+ * 2. Zero BSS now (32-bit, no paging) so page tables start clean.
+ * 3. Build identity-map page tables (first 1 GiB, 2 MiB huge pages).
+ * 4. Enable PAE + long mode + paging; far-jump to 64-bit code.
+ * 5. Reload segments, set up the stack, call hal_init → oberon_main → hal_halt.
+ *
+ * Zeroing BSS before enabling paging avoids a triple-fault that would
+ * otherwise occur when rep stosb exhausts the software TLB and the MMU
+ * tries to walk the by-then-zeroed page tables.
+ */
+
 .set MULTIBOOT2_MAGIC,    0xE85250D6
 .set MULTIBOOT2_ARCH_I386, 0
 .set MULTIBOOT2_HDRLEN,   16
 .set MULTIBOOT2_CHECKSUM, -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH_I386 + MULTIBOOT2_HDRLEN)
 
 /* -----------------------------------------------------------------------
- * Multiboot2 header (must be in first 32 KiB of the image, 8-byte aligned)
+ * Multiboot2 header (must be within the first 32 KiB, 8-byte aligned)
  * ----------------------------------------------------------------------- */
 .section .multiboot2, "a"
 .align 8
@@ -14,15 +28,13 @@ multiboot2_header:
     .long  MULTIBOOT2_ARCH_I386
     .long  MULTIBOOT2_HDRLEN
     .long  (MULTIBOOT2_CHECKSUM & 0xFFFFFFFF)
-    /* end tag (type=0, flags=0, size=8) */
+    /* end tag */
     .short 0
     .short 0
     .long  8
 
 /* -----------------------------------------------------------------------
- * Page tables (identity-map first 1 GiB using 2 MiB huge pages)
- * Located in BSS so they are 4-KiB aligned sections of zeros initially.
- * We fill them in _start before enabling paging.
+ * Page tables – in BSS (zeroed by us in step 2 before we fill them in)
  * ----------------------------------------------------------------------- */
 .section .bss
 .align 4096
@@ -35,10 +47,8 @@ pd:     .space 4096
 _stack_bot: .space 65536
 _stack_top:
 
-/* Tell the linker this code does not require an executable stack */
 .section .note.GNU-stack,"",@progbits
 
-/* BSS markers (defined by linker script — just declared here for asm use) */
 .extern _bss_start
 .extern _bss_end
 
@@ -55,36 +65,52 @@ gdt64_end:
 
 gdt64_ptr:
     .word gdt64_end - gdt64 - 1
-    .long gdt64                       /* 32-bit address (fits in low 4 GiB) */
+    .long gdt64
 
 /* -----------------------------------------------------------------------
- * 32-bit entry point (GRUB/QEMU drops us here in protected mode)
+ * 32-bit entry point
  * ----------------------------------------------------------------------- */
 .section .text
 .code32
 .global _start
 _start:
     cli
-    /* Save multiboot2 info pointer from %ebx (not used now, but kept) */
+    /* Save multiboot2 info pointer (unused beyond this point) */
     movl    %ebx, %esi
 
-    /* ---- Build identity-map page tables -------------------------------- */
+    /* ------------------------------------------------------------------ */
+    /* Step 1: Zero BSS in 32-bit mode, before paging is enabled.         */
+    /*                                                                     */
+    /* This includes pml4/pdpt/pd, which we then fill in from scratch.    */
+    /* Doing it here avoids invalidating the active page tables while      */
+    /* running rep stosb in 64-bit mode (a source of triple-faults when   */
+    /* the kernel's BSS is larger than the TLB can cover).                */
+    /* ------------------------------------------------------------------ */
+    movl    $_bss_start, %edi
+    movl    $_bss_end,   %ecx
+    subl    %edi, %ecx
+    xorl    %eax, %eax
+    rep stosb
 
-    /* PML4[0] → PDPT (present | writable) */
+    /* ------------------------------------------------------------------ */
+    /* Step 2: Build identity-map page tables (first 1 GiB, 2 MiB pages) */
+    /* ------------------------------------------------------------------ */
+
+    /* PML4[0] → PDPT */
     movl    $pdpt, %eax
     orl     $0x3, %eax
     movl    %eax, pml4
 
-    /* PDPT[0] → PD (present | writable) */
+    /* PDPT[0] → PD */
     movl    $pd, %eax
     orl     $0x3, %eax
     movl    %eax, pdpt
 
-    /* PD[0..511]: 512 × 2 MiB huge pages (present | writable | PS) */
+    /* PD[0..511]: 512 × 2 MiB huge pages */
     movl    $0, %ecx
 1:
     movl    %ecx, %eax
-    shll    $21, %eax           /* page base address (lower 32 bits) */
+    shll    $21, %eax           /* 2 MiB page base (low 32 bits) */
     orl     $0x83, %eax         /* present | writable | huge */
     movl    %eax, pd(,%ecx,8)
     movl    $0, pd+4(,%ecx,8)
@@ -92,27 +118,25 @@ _start:
     cmpl    $512, %ecx
     jne     1b
 
-    /* ---- Enable PAE + long mode + paging ------------------------------- */
+    /* ------------------------------------------------------------------ */
+    /* Step 3: Enable PAE + long mode + paging                            */
+    /* ------------------------------------------------------------------ */
     movl    $pml4, %eax
     movl    %eax, %cr3
 
-    /* CR4: PAE (bit 5) */
     movl    %cr4, %eax
-    orl     $0x20, %eax
+    orl     $0x20, %eax         /* PAE */
     movl    %eax, %cr4
 
-    /* EFER: LME (bit 8) via MSR 0xC0000080 */
     movl    $0xC0000080, %ecx
     rdmsr
-    orl     $0x100, %eax
+    orl     $0x100, %eax        /* LME */
     wrmsr
 
-    /* CR0: paging (bit 31) + protected mode (bit 0) */
     movl    %cr0, %eax
-    orl     $0x80000001, %eax
+    orl     $0x80000001, %eax   /* PG | PE */
     movl    %eax, %cr0
 
-    /* Far jump to flush prefetch queue and activate 64-bit mode */
     lgdt    gdt64_ptr
     ljmpl   $0x08, $_start64
 
@@ -121,7 +145,6 @@ _start:
  * ----------------------------------------------------------------------- */
 .code64
 _start64:
-    /* Load data segment into remaining segment registers */
     movw    $0x10, %ax
     movw    %ax, %ds
     movw    %ax, %es
@@ -130,22 +153,14 @@ _start64:
     movw    %ax, %fs
     movw    %ax, %gs
 
-    /* Set up stack */
     movabsq $_stack_top, %rsp
 
-    /* Zero BSS */
-    movabsq $_bss_start, %rdi
-    movabsq $_bss_end,   %rcx
-    subq    %rdi, %rcx
-    xorl    %eax, %eax
-    rep stosb
+    /* BSS is already zeroed (done in 32-bit mode above) */
 
-    /* Call runtime */
     call    hal_init
     call    oberon_main
     call    hal_halt
 
-    /* Should never reach here */
 .Lhalt64:
     cli
     hlt

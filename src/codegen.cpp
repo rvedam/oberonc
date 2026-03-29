@@ -130,6 +130,7 @@ void CodeGen::registerBuiltins() {
         return t;
     };
     typeTable_["INTEGER"]  = make(TypeKind::Integer,  "INTEGER");
+    typeTable_["LONGINT"]  = make(TypeKind::Integer,  "LONGINT"); // Project Oberon compat alias
     typeTable_["REAL"]     = make(TypeKind::Real,     "REAL");
     typeTable_["BOOLEAN"]  = make(TypeKind::Boolean,  "BOOLEAN");
     typeTable_["CHAR"]     = make(TypeKind::Char,     "CHAR");
@@ -369,6 +370,13 @@ void CodeGen::genImports(const std::vector<ImportEntry>& imports) {
             llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                     "Oberon_NEW", llvmMod_.get());
     }
+    // Always declare Oberon_Trap (used by ASSERT built-in)
+    {
+        auto* ft = llvm::FunctionType::get(voidTy, {}, false);
+        extFuncs_["Oberon_Trap"] =
+            llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                    "Oberon_Trap", llvmMod_.get());
+    }
 
     for (auto& imp : imports) {
         std::string modAlias = imp.alias.empty() ? imp.name : imp.alias;
@@ -515,11 +523,18 @@ void CodeGen::genConstDecls(const std::vector<ConstDecl>& decls, bool global) {
             sym.type    = typeTable_["BOOLEAN"];
             sym.llvmVal = llvm::ConstantInt::getFalse(ctx_);
         } else {
-            // General expression: generate it in current function context.
-            // If global (module level), we can't do that yet; skip for now.
-            if (!global) {
-                sym.type    = typeTable_["INTEGER"]; // best guess
-                sym.llvmVal = genExpr(*cd.value);
+            // Try to fold as a compile-time integer constant first.
+            // This handles negatives (-64), hex constants, arithmetic, etc.
+            try {
+                int64_t val = evalConstInt(*cd.value);
+                sym.type    = typeTable_["INTEGER"];
+                sym.llvmVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), val);
+            } catch (const std::runtime_error&) {
+                // Not a constant integer: can only generate in a function context.
+                if (!global) {
+                    sym.type    = typeTable_["INTEGER"]; // best guess
+                    sym.llvmVal = genExpr(*cd.value);
+                }
             }
         }
         if (sym.llvmVal) addSym(cd.name, std::move(sym));
@@ -682,9 +697,9 @@ void CodeGen::genProc(const ProcDecl& pd) {
 // DeclarationSequence  (delegates to const/var/type/proc generators)
 // -----------------------------------------------------------------------
 void CodeGen::genDecls(const DeclarationSequence& ds, bool global) {
+    genConstDecls(ds.consts, global);  // must precede type/var resolution
     registerTypeDecls(ds.types);
     fillTypeDecls(ds.types);
-    genConstDecls(ds.consts, global);
     genVarDecls  (ds.vars,   global);
     declareProcs (ds.procs);
     for (auto& pd : ds.procs)
@@ -796,6 +811,19 @@ int64_t CodeGen::evalConstInt(const Expr& e) {
     if (auto* ue = dynamic_cast<const UnaryExpr*>(&e)) {
         if (ue->op == UnaryOp::Minus) return -evalConstInt(*ue->operand);
         if (ue->op == UnaryOp::Plus)  return  evalConstInt(*ue->operand);
+    }
+
+    if (auto* be = dynamic_cast<const BinaryExpr*>(&e)) {
+        int64_t lv = evalConstInt(*be->left);
+        int64_t rv = evalConstInt(*be->right);
+        switch (be->op) {
+            case BinaryOp::Add:  return lv + rv;
+            case BinaryOp::Sub:  return lv - rv;
+            case BinaryOp::Mul:  return lv * rv;
+            case BinaryOp::IDiv: return lv / rv;
+            case BinaryOp::IMod: return lv % rv;
+            default: break;
+        }
     }
 
     if (auto* de = dynamic_cast<const DesignatorExpr*>(&e)) {

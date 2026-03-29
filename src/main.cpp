@@ -68,13 +68,16 @@ static std::string compileToObject(const std::string& modSrcPath) {
 
 static void usage() {
     std::cerr <<
-        "usage: oberonc [--emit-llvm] [-o output] <file.Mod>\n"
+        "usage: oberonc [--emit-llvm] [--init-only] [-o output] <file.Mod>\n"
         "  --emit-llvm   emit LLVM IR (.ll) instead of linking an executable\n"
+        "  --init-only   emit ModuleName_init() instead of oberon_main()\n"
+        "                (use when compiling library/dependency modules)\n"
         "  -o output     output file path (executable, or .ll with --emit-llvm)\n";
 }
 
 int main(int argc, char* argv[]) {
-    bool emitLLVM = false;
+    bool emitLLVM   = false;
+    bool initOnly   = false;
     std::string outputArg;
     std::string srcPath;
 
@@ -82,6 +85,8 @@ int main(int argc, char* argv[]) {
         std::string a = argv[i];
         if (a == "--emit-llvm") {
             emitLLVM = true;
+        } else if (a == "--init-only") {
+            initOnly = true;
         } else if (a == "-o") {
             if (++i >= argc) { usage(); return 1; }
             outputArg = argv[i];
@@ -110,6 +115,7 @@ int main(int argc, char* argv[]) {
         std::string srcDir = std::filesystem::path(srcPath).parent_path().string();
         if (srcDir.empty()) srcDir = ".";
         cg.setModulePaths({srcDir});
+        if (initOnly) cg.setModuleInitOnly(true);
         cg.generate(mod);
 
         if (emitLLVM) {
