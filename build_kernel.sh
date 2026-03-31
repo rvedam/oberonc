@@ -9,6 +9,14 @@
 #   -o, --output FILE   Output file (default: kernel_<arch>.iso / kernel_<arch>.elf)
 #   --iso               Force ISO output even if grub-mkrescue is unavailable
 #   --elf               Produce a raw ELF only (skip ISO creation)
+#   --debug-info        Emit DWARF debug info (passes --debugger-tune=gdb --dwarf-version=4 to llc)
+#   --run               Launch QEMU after building (add debugging flags below as needed)
+#   --gdb               With --run: add GDB stub (-s -S); pause VM until GDB connects
+#                       Connect with: gdb -ex "target remote :1234"
+#   --qmp               With --run: add QMP JSON socket at ./qmp.sock
+#                       Query with: echo '{"execute":"qmp_capabilities"}' | nc -U ./qmp.sock
+#   --monitor           With --run: expose QEMU monitor on ./mon.sock
+#                       Connect with: nc -U ./mon.sock  (then: info registers, x/10i $rip, ...)
 #   -h, --help          Show this help
 #
 # The first .Mod file is the "main" module (provides oberon_main).
@@ -20,6 +28,8 @@
 #   - ld (binutils, same arch as target)
 #   - grub-mkrescue + xorriso (for ISO output on x86_64)
 #   - aarch64-linux-gnu-{g++,ld} (for aarch64 cross-compilation)
+#   - gdb (optional, for --gdb)
+#   - qemu-system-{x86_64,aarch64} (for --run)
 
 set -euo pipefail
 
@@ -30,6 +40,11 @@ ARCH=x86_64
 OUTPUT=""
 FORCE_ISO=0
 ELF_ONLY=0
+DEBUG_INFO=0
+RUN_QEMU=0
+GDB_STUB=0
+QMP_SOCK=0
+MONITOR_SOCK=0
 MAIN_MOD=""
 DEP_MODS=()
 
@@ -42,6 +57,11 @@ while [[ $# -gt 0 ]]; do
         -o|--output)  OUTPUT="$2"; shift 2 ;;
         --iso)        FORCE_ISO=1; shift ;;
         --elf)        ELF_ONLY=1; shift ;;
+        --debug-info) DEBUG_INFO=1; shift ;;
+        --run)        RUN_QEMU=1; shift ;;
+        --gdb)        GDB_STUB=1; RUN_QEMU=1; shift ;;
+        --qmp)        QMP_SOCK=1; RUN_QEMU=1; shift ;;
+        --monitor)    MONITOR_SOCK=1; RUN_QEMU=1; shift ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -130,8 +150,12 @@ assemble_ll() {
     local objfile="$WORK_DIR/$(basename "${llfile%.ll}").o"
 
     echo "  [llc]     $(basename "$llfile") → $(basename "$objfile")" >&2
+    local debug_flags=""
+    [[ "$DEBUG_INFO" -eq 1 ]] && debug_flags="--debugger-tune=gdb --dwarf-version=4"
+    # shellcheck disable=SC2086
     "$LLC" --march="$LLC_ARCH" --filetype=obj \
            --relocation-model=static \
+           $debug_flags \
            "$llfile" -o "$objfile" >&2
     echo "$objfile"
 }
@@ -272,6 +296,71 @@ elif [[ "$ARCH" == "aarch64" ]]; then
     echo "    qemu-system-aarch64 -M virt -cpu cortex-a57 \\"
     echo "        -kernel $ELF_OUT \\"
     echo "        -serial stdio -display none -no-reboot"
+fi
+
+# ---------------------------------------------------------------------------
+# Launch QEMU (if requested)
+# ---------------------------------------------------------------------------
+if [[ "$RUN_QEMU" -eq 1 ]]; then
+    echo ""
+    echo "==> Launching QEMU..."
+
+    # Build QEMU command line
+    if [[ "$ARCH" == "x86_64" ]]; then
+        QEMU_BIN="qemu-system-x86_64"
+        QEMU_KERNEL_ARGS=(-cdrom "$ISO_OUT")
+        QEMU_BASE_ARGS=(-serial stdio -display none -no-reboot -m 128M)
+    else
+        QEMU_BIN="qemu-system-aarch64"
+        QEMU_KERNEL_ARGS=(-M virt -cpu cortex-a57 -kernel "$ELF_OUT")
+        QEMU_BASE_ARGS=(-serial stdio -display none -no-reboot)
+    fi
+
+    QEMU_DEBUG_ARGS=()
+
+    if [[ "$GDB_STUB" -eq 1 ]]; then
+        # -S pauses VM at start; GDB must connect before execution begins
+        QEMU_DEBUG_ARGS+=(-s -S)
+        echo ""
+        echo "    GDB stub enabled on tcp::1234 (VM paused — connect GDB first)"
+        echo "    Connect:"
+        echo "      gdb build/kernel_${ARCH}.elf \\"
+        echo "          -ex 'target remote :1234' \\"
+        echo "          -ex 'break *0x100040' \\"
+        echo "          -ex 'continue'"
+        echo ""
+        echo "    Useful GDB commands:"
+        echo "      info registers        — dump all CPU registers"
+        echo "      x/10i \$rip           — disassemble at current instruction"
+        echo "      x/4xg 0x100000        — hex dump physical memory"
+        echo "      stepi / nexti         — single-step one instruction"
+    fi
+
+    if [[ "$QMP_SOCK" -eq 1 ]]; then
+        rm -f ./qmp.sock
+        QEMU_DEBUG_ARGS+=(-qmp "unix:./qmp.sock,server,nowait")
+        echo ""
+        echo "    QMP socket: ./qmp.sock"
+        echo "    Query examples:"
+        echo "      echo '{\"execute\":\"qmp_capabilities\"}' | nc -U ./qmp.sock"
+        echo "      echo '{\"execute\":\"query-status\"}'     | nc -U ./qmp.sock"
+        echo "      printf '{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"info registers\"}}' | nc -U ./qmp.sock"
+    fi
+
+    if [[ "$MONITOR_SOCK" -eq 1 ]]; then
+        rm -f ./mon.sock
+        QEMU_DEBUG_ARGS+=(-monitor "unix:./mon.sock,server,nowait")
+        echo ""
+        echo "    Monitor socket: ./mon.sock"
+        echo "    Connect: nc -U ./mon.sock"
+        echo "    Commands: info registers | x /10i \$rip | xp /4xg 0x100000 | stop | cont"
+    fi
+
+    echo ""
+    echo "    $ $QEMU_BIN ${QEMU_KERNEL_ARGS[*]} ${QEMU_BASE_ARGS[*]} ${QEMU_DEBUG_ARGS[*]}"
+    echo ""
+
+    exec "$QEMU_BIN" "${QEMU_KERNEL_ARGS[@]}" "${QEMU_BASE_ARGS[@]}" "${QEMU_DEBUG_ARGS[@]}"
 fi
 
 echo ""
