@@ -71,3 +71,5 @@ int hal_getc() {
     for (;;) {} // host build: busy loop (never called in practice)
 #endif
 }
+
+void hal_display_flush() {} // AArch64: no VBE display

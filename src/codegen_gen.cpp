@@ -68,7 +68,16 @@ CodeGen::AddrResult CodeGen::genAddr(const Designator& d) {
         base = b_->CreateStructGEP(toLLVM(ty), base, idx, d.ident);
         ty   = ty->fields[idx].type;
     } else {
-        auto* sym = lookupSym(d.ident);
+        // If d.module names an imported module, the exported var was registered
+        // in the symbol table as "module_ident".
+        std::string key = (!d.module.empty() && importedModules_.count(d.module))
+                          ? (d.module + "_" + d.ident)
+                          : d.ident;
+        auto* sym = lookupSym(key);
+        if (!sym) {
+            // Try bare ident as fallback (e.g., unqualified local var)
+            if (key != d.ident) sym = lookupSym(d.ident);
+        }
         if (!sym) error("unknown symbol: " + d.ident);
         base = sym->llvmVal;
         ty   = sym->type;
@@ -156,14 +165,22 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
                 // Range: try to fold if constants, otherwise loop
                 auto* loC = llvm::dyn_cast<llvm::ConstantInt>(lo);
                 auto* hiC = llvm::dyn_cast<llvm::ConstantInt>(genExpr(*elem.hi));
-                if (loC && hiC) {
+                auto* hi = genExpr(*elem.hi);
+                if (loC && llvm::isa<llvm::ConstantInt>(hi)) {
+                    // Constant fold
                     int64_t mask = 0;
-                    for (int64_t v = loC->getSExtValue();
-                             v <= hiC->getSExtValue(); ++v)
+                    int64_t hv = llvm::cast<llvm::ConstantInt>(hi)->getSExtValue();
+                    for (int64_t v = loC->getSExtValue(); v <= hv; ++v)
                         mask |= (int64_t(1) << v);
                     result = b_->CreateOr(result, llvm::ConstantInt::get(i64, mask));
                 } else {
-                    error("non-constant set range not yet supported");
+                    // Runtime: {lo..hi} = (-1 << lo) & (-1 >>> (63 - hi))
+                    auto* allOnes = llvm::ConstantInt::get(i64, uint64_t(-1));
+                    auto* c63     = llvm::ConstantInt::get(i64, 63);
+                    auto* loMask  = b_->CreateShl (allOnes, coerce(lo, i64));
+                    auto* hiMask  = b_->CreateLShr(allOnes,
+                                        b_->CreateSub(c63, coerce(hi, i64)));
+                    result = b_->CreateOr(result, b_->CreateAnd(loMask, hiMask));
                 }
             } else {
                 auto* bit = b_->CreateShl(one, lo);
@@ -189,28 +206,116 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
     if (auto* be = dynamic_cast<const BinaryExpr*>(&e)) {
         auto* lhs = genExpr(*be->left);
         auto* rhs = genExpr(*be->right);
-        bool fp = lhs->getType()->isDoubleTy();
+        bool fp = lhs->getType()->isDoubleTy() || rhs->getType()->isDoubleTy();
+
+        // Determine if operands are SET type (vs arithmetic INTEGER/BYTE).
+        // In Oberon, /  on integers is illegal — it is always SET symmetric-difference.
+        // For +, -, *, check if the left operand was declared as SET.
+        auto lhsOberonKind = [&]() -> TypeKind {
+            if (auto* de = dynamic_cast<const DesignatorExpr*>(be->left.get())) {
+                if (!de->args && de->desig->selectors.empty() && de->desig->module.empty()) {
+                    auto* sym = lookupSym(de->desig->ident);
+                    if (sym && sym->type) return sym->type->kind;
+                }
+            }
+            return TypeKind::Integer;
+        };
+
+        // Normalise integer operand widths: BYTE (i8) widens to the other side,
+        // or to i64 if both are narrow; this follows Oberon's implicit widening rules.
+        auto normaliseInts = [&](llvm::Value*& l, llvm::Value*& r) {
+            if (!l->getType()->isIntegerTy() || !r->getType()->isIntegerTy()) return;
+            if (l->getType() == r->getType()) return;
+            // Widen the narrower side to the wider, with a floor of i64
+            auto* i64 = llvm::Type::getInt64Ty(ctx_);
+            unsigned lw = l->getType()->getIntegerBitWidth();
+            unsigned rw = r->getType()->getIntegerBitWidth();
+            unsigned tgt = std::max({lw, rw, 64u});
+            auto* tgtTy  = llvm::Type::getIntNTy(ctx_, tgt);
+            if (lw < tgt) l = b_->CreateSExtOrTrunc(l, tgtTy);
+            if (rw < tgt) r = b_->CreateSExtOrTrunc(r, tgtTy);
+            (void)i64;
+        };
+
+        // Reconcile for comparisons: pointer mismatches → i8*; int widths → widen.
+        auto reconcile = [&]() -> std::pair<llvm::Value*,llvm::Value*> {
+            llvm::Value *l = lhs, *r = rhs;
+            if (l->getType() == r->getType()) return {l, r};
+            auto* i8p = llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0);
+            if (l->getType()->isPointerTy() && r->getType()->isPointerTy())
+                return {b_->CreateBitCast(l,i8p), b_->CreateBitCast(r,i8p)};
+            if (l->getType()->isIntegerTy() && r->getType()->isIntegerTy()) {
+                normaliseInts(l, r);
+                return {l, r};
+            }
+            return {l, r};
+        };
+
         switch (be->op) {
-        case BinaryOp::Add:  return fp ? b_->CreateFAdd(lhs,rhs) : b_->CreateAdd(lhs,rhs);
-        case BinaryOp::Sub:  return fp ? b_->CreateFSub(lhs,rhs) : b_->CreateSub(lhs,rhs);
-        case BinaryOp::Mul:  return fp ? b_->CreateFMul(lhs,rhs) : b_->CreateMul(lhs,rhs);
-        case BinaryOp::Div:  return b_->CreateFDiv(lhs,rhs);
-        case BinaryOp::IDiv: return b_->CreateSDiv(lhs,rhs);
-        case BinaryOp::IMod: return b_->CreateSRem(lhs,rhs);
-        case BinaryOp::And:  return b_->CreateAnd(lhs,rhs);
-        case BinaryOp::Or:   return b_->CreateOr (lhs,rhs);
-        case BinaryOp::Eq:
-            return fp ? b_->CreateFCmpOEQ(lhs,rhs) : b_->CreateICmpEQ (lhs,rhs);
-        case BinaryOp::Neq:
-            return fp ? b_->CreateFCmpONE(lhs,rhs) : b_->CreateICmpNE (lhs,rhs);
-        case BinaryOp::Lt:
-            return fp ? b_->CreateFCmpOLT(lhs,rhs) : b_->CreateICmpSLT(lhs,rhs);
-        case BinaryOp::Leq:
-            return fp ? b_->CreateFCmpOLE(lhs,rhs) : b_->CreateICmpSLE(lhs,rhs);
-        case BinaryOp::Gt:
-            return fp ? b_->CreateFCmpOGT(lhs,rhs) : b_->CreateICmpSGT(lhs,rhs);
-        case BinaryOp::Geq:
-            return fp ? b_->CreateFCmpOGE(lhs,rhs) : b_->CreateICmpSGE(lhs,rhs);
+        case BinaryOp::Add: {
+            if (fp) return b_->CreateFAdd(lhs, rhs);
+            if (lhsOberonKind() == TypeKind::Set) {
+                // SET union = OR
+                auto [l,r] = reconcile(); normaliseInts(l,r);
+                return b_->CreateOr(l, r);
+            }
+            auto [l,r] = reconcile(); normaliseInts(l,r);
+            return b_->CreateAdd(l, r);
+        }
+        case BinaryOp::Sub: {
+            if (fp) return b_->CreateFSub(lhs, rhs);
+            if (lhsOberonKind() == TypeKind::Set) {
+                // SET difference = AND NOT (a & ~b)
+                auto [l,r] = reconcile(); normaliseInts(l,r);
+                return b_->CreateAnd(l, b_->CreateNot(r));
+            }
+            auto [l,r] = reconcile(); normaliseInts(l,r);
+            return b_->CreateSub(l, r);
+        }
+        case BinaryOp::Mul: {
+            if (fp) return b_->CreateFMul(lhs, rhs);
+            if (lhsOberonKind() == TypeKind::Set) {
+                // SET intersection = AND
+                auto [l,r] = reconcile(); normaliseInts(l,r);
+                return b_->CreateAnd(l, r);
+            }
+            auto [l,r] = reconcile(); normaliseInts(l,r);
+            return b_->CreateMul(l, r);
+        }
+        case BinaryOp::Div: {
+            if (fp) return b_->CreateFDiv(lhs, rhs);
+            // Non-fp /  is always SET symmetric difference (XOR); / on INTEGER is invalid Oberon
+            auto [l,r] = reconcile(); normaliseInts(l,r);
+            return b_->CreateXor(l, r);
+        }
+        case BinaryOp::IDiv: { auto [l,r] = reconcile(); normaliseInts(l,r); return b_->CreateSDiv(l,r); }
+        case BinaryOp::IMod: { auto [l,r] = reconcile(); normaliseInts(l,r); return b_->CreateSRem(l,r); }
+        case BinaryOp::And:  { auto [l,r] = reconcile(); normaliseInts(l,r); return b_->CreateAnd(l,r); }
+        case BinaryOp::Or:   { auto [l,r] = reconcile(); normaliseInts(l,r); return b_->CreateOr (l,r); }
+        case BinaryOp::Eq: {
+            auto [l,r] = reconcile();
+            return fp ? b_->CreateFCmpOEQ(l,r) : b_->CreateICmpEQ (l,r);
+        }
+        case BinaryOp::Neq: {
+            auto [l,r] = reconcile();
+            return fp ? b_->CreateFCmpONE(l,r) : b_->CreateICmpNE (l,r);
+        }
+        case BinaryOp::Lt: {
+            auto [l,r] = reconcile();
+            return fp ? b_->CreateFCmpOLT(l,r) : b_->CreateICmpSLT(l,r);
+        }
+        case BinaryOp::Leq: {
+            auto [l,r] = reconcile();
+            return fp ? b_->CreateFCmpOLE(l,r) : b_->CreateICmpSLE(l,r);
+        }
+        case BinaryOp::Gt: {
+            auto [l,r] = reconcile();
+            return fp ? b_->CreateFCmpOGT(l,r) : b_->CreateICmpSGT(l,r);
+        }
+        case BinaryOp::Geq: {
+            auto [l,r] = reconcile();
+            return fp ? b_->CreateFCmpOGE(l,r) : b_->CreateICmpSGE(l,r);
+        }
         case BinaryOp::In: {
             // e IN s  →  (s >> e) & 1  !=  0
             auto* i64 = llvm::Type::getInt64Ty(ctx_);
@@ -228,7 +333,16 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
         if (de->args.has_value())
             return genCallVal(*de);
 
-        auto* sym = lookupSym(de->desig->ident);
+        // For imported module qualidents try "module_ident" first (covers
+        // constants AND variables imported via loadModuleInterface).
+        auto* sym = [&]() -> Symbol* {
+            if (!de->desig->module.empty() &&
+                importedModules_.count(de->desig->module)) {
+                auto* s = lookupSym(de->desig->module + "_" + de->desig->ident);
+                if (s) return s;
+            }
+            return lookupSym(de->desig->ident);
+        }();
 
         // String constant → return i8* directly
         if (sym && sym->isConst && sym->type &&
@@ -560,7 +674,47 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
         }
     }
 
-    // Resolve function
+    // Indirect call through a procedure variable or record field
+    {
+        bool isFieldCall = !d.module.empty() && !importedModules_.count(d.module);
+        Symbol* procSym  = nullptr;
+        if (!isFieldCall && d.module.empty())
+            procSym = lookupSym(d.ident);
+
+        if (isFieldCall ||
+            (procSym && procSym->type && procSym->type->kind == TypeKind::Procedure)) {
+            auto [addr, procTy] = isFieldCall ? genAddr(d)
+                                              : AddrResult{procSym->llvmVal, procSym->type};
+            if (!procTy || procTy->kind != TypeKind::Procedure)
+                error("indirect call on non-procedure type: " + d.ident);
+            auto* fnptrLLVM = toLLVM(procTy);
+            auto* fnptr     = b_->CreateLoad(fnptrLLVM, addr, "fnptr");
+            auto* fty       = llvm::cast<llvm::FunctionType>(
+                fnptrLLVM->getPointerElementType());
+            std::vector<llvm::Value*> args;
+            if (de.args) {
+                for (size_t i = 0; i < de.args->size(); ++i) {
+                    auto& argExpr = *(*de.args)[i];
+                    llvm::Type* expectedTy = (i < fty->getNumParams())
+                                             ? fty->getParamType(i) : nullptr;
+                    llvm::Value* v = nullptr;
+                    if (expectedTy && expectedTy->isPointerTy()) {
+                        if (auto* dse = dynamic_cast<const DesignatorExpr*>(&argExpr)) {
+                            if (!dse->args) {
+                                auto [a, _] = genAddr(*dse->desig);
+                                v = coerce(a, expectedTy);
+                            }
+                        }
+                    }
+                    if (!v) { v = genExpr(argExpr); if (expectedTy) v = coerce(v, expectedTy); }
+                    args.push_back(v);
+                }
+            }
+            return b_->CreateCall(fty, fnptr, args);
+        }
+    }
+
+    // Resolve function (direct call)
     llvm::Function* fn = nullptr;
     if (!d.module.empty() && importedModules_.count(d.module)) {
         // Imported: Out.String → Out_String
@@ -742,6 +896,52 @@ void CodeGen::genCall(const ProcCallStmt& s) {
             raw, llvm::PointerType::get(baseLLVM, 0));
         b_->CreateStore(coerce(typed, toLLVM(ptrTy)), ptrAddr);
         return;
+    }
+
+    // Indirect call through a procedure variable or record field.
+    // This happens when:
+    //   (a) d.module is set but is NOT an imported module — e.g., F.handle(…)
+    //       parsed as qualident{module="F", ident="handle"} where F is a variable.
+    //   (b) d.module is empty but d.ident is a local symbol of Procedure type —
+    //       e.g., a bare procedure-variable call p(…).
+    {
+        bool isFieldCall = !d.module.empty() && !importedModules_.count(d.module);
+        Symbol* procSym  = nullptr;
+        if (!isFieldCall && d.module.empty())
+            procSym = lookupSym(d.ident);
+
+        if (isFieldCall ||
+            (procSym && procSym->type && procSym->type->kind == TypeKind::Procedure)) {
+            auto [addr, procTy] = isFieldCall ? genAddr(d)
+                                              : AddrResult{procSym->llvmVal, procSym->type};
+            if (!procTy || procTy->kind != TypeKind::Procedure)
+                error("indirect call on non-procedure type: " + d.ident);
+            auto* fnptrLLVM = toLLVM(procTy);                          // ptr-to-FunctionType
+            auto* fnptr     = b_->CreateLoad(fnptrLLVM, addr, "fnptr");
+            auto* fty       = llvm::cast<llvm::FunctionType>(
+                fnptrLLVM->getPointerElementType());
+            std::vector<llvm::Value*> args;
+            if (s.args) {
+                for (size_t i = 0; i < s.args->size(); ++i) {
+                    auto& argExpr = *(*s.args)[i];
+                    llvm::Type* expectedTy = (i < fty->getNumParams())
+                                             ? fty->getParamType(i) : nullptr;
+                    llvm::Value* v = nullptr;
+                    if (expectedTy && expectedTy->isPointerTy()) {
+                        if (auto* dse = dynamic_cast<const DesignatorExpr*>(&argExpr)) {
+                            if (!dse->args) {
+                                auto [a, _] = genAddr(*dse->desig);
+                                v = coerce(a, expectedTy);
+                            }
+                        }
+                    }
+                    if (!v) { v = genExpr(argExpr); if (expectedTy) v = coerce(v, expectedTy); }
+                    args.push_back(v);
+                }
+            }
+            b_->CreateCall(fty, fnptr, args);
+            return;
+        }
     }
 
     // Regular procedure call — resolve the function and build args directly.

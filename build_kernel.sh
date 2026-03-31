@@ -288,7 +288,7 @@ GRUBCFG
     echo ""
     echo "==> Run with QEMU:"
     echo "    qemu-system-x86_64 -cdrom $ISO_OUT \\"
-    echo "        -serial stdio -display none -no-reboot -m 128M"
+    echo "        -serial stdio -vga std -no-reboot -m 128M"
 
 elif [[ "$ARCH" == "aarch64" ]]; then
     echo ""
@@ -309,7 +309,9 @@ if [[ "$RUN_QEMU" -eq 1 ]]; then
     if [[ "$ARCH" == "x86_64" ]]; then
         QEMU_BIN="qemu-system-x86_64"
         QEMU_KERNEL_ARGS=(-cdrom "$ISO_OUT")
-        QEMU_BASE_ARGS=(-serial stdio -display none -no-reboot -m 128M)
+        # -vga std exposes the Bochs VBE extension needed by the display driver.
+        # Do NOT use -display none here: the user wants to see the graphical output.
+        QEMU_BASE_ARGS=(-serial stdio -vga std -no-reboot -m 128M)
     else
         QEMU_BIN="qemu-system-aarch64"
         QEMU_KERNEL_ARGS=(-M virt -cpu cortex-a57 -kernel "$ELF_OUT")

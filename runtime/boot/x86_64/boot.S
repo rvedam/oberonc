@@ -40,7 +40,13 @@ multiboot2_header:
 .align 4096
 pml4:   .space 4096
 pdpt:   .space 4096
-pd:     .space 4096
+pd0:    .space 4096          /* 0x000000000 – 0x03FFFFFFF (first  1 GiB) */
+pd1:    .space 4096          /* 0x040000000 – 0x07FFFFFFF (second 1 GiB) */
+pd2:    .space 4096          /* 0x080000000 – 0x0BFFFFFFF (third  1 GiB) */
+pd3:    .space 4096          /* 0x0C0000000 – 0x0FFFFFFFF (fourth 1 GiB, covers 0xFD000000 VBE LFB) */
+
+/* Alias pd → pd0 for backward compatibility */
+.set pd, pd0
 
 /* 64 KiB stack */
 .align 16
@@ -93,7 +99,10 @@ _start:
     rep stosb
 
     /* ------------------------------------------------------------------ */
-    /* Step 2: Build identity-map page tables (first 1 GiB, 2 MiB pages) */
+    /* Step 2: Build identity-map page tables (first 4 GiB, 2 MiB pages) */
+    /*                                                                     */
+    /* 4 GiB covers the VBE linear framebuffer at ~0xFD000000 so that     */
+    /* hal_display_flush can write to the Bochs VBE LFB on QEMU.          */
     /* ------------------------------------------------------------------ */
 
     /* PML4[0] → PDPT */
@@ -101,22 +110,48 @@ _start:
     orl     $0x3, %eax
     movl    %eax, pml4
 
-    /* PDPT[0] → PD */
-    movl    $pd, %eax
+    /* PDPT[0..3] → pd0..pd3 (one 4 KiB PD per GiB) */
+    movl    $pd0, %eax
     orl     $0x3, %eax
-    movl    %eax, pdpt
+    movl    %eax, pdpt+0        /* PDPT[0] */
 
-    /* PD[0..511]: 512 × 2 MiB huge pages */
+    movl    $pd1, %eax
+    orl     $0x3, %eax
+    movl    %eax, pdpt+8        /* PDPT[1] */
+
+    movl    $pd2, %eax
+    orl     $0x3, %eax
+    movl    %eax, pdpt+16       /* PDPT[2] */
+
+    movl    $pd3, %eax
+    orl     $0x3, %eax
+    movl    %eax, pdpt+24       /* PDPT[3] */
+
+    /* Fill all 4 PDs: 4 × 512 entries = 2048 × 2 MiB = 4 GiB */
+    /* ECX = global page index 0..2047; page base = ECX << 21   */
     movl    $0, %ecx
-1:
+2:
     movl    %ecx, %eax
     shll    $21, %eax           /* 2 MiB page base (low 32 bits) */
     orl     $0x83, %eax         /* present | writable | huge */
-    movl    %eax, pd(,%ecx,8)
-    movl    $0, pd+4(,%ecx,8)
+
+    /* Select the right PD: pd0 for ECX 0..511, pd1 for 512..1023, etc. */
+    movl    %ecx, %edx
+    shrl    $9, %edx            /* EDX = ECX / 512 = PD index (0..3)  */
+    movl    %ecx, %esi
+    andl    $511, %esi          /* ESI = ECX MOD 512 = entry in PD     */
+
+    /* Compute PD base address: pd0 + EDX*4096 */
+    movl    $pd0, %edi
+    imull   $4096, %edx, %edx
+    addl    %edx, %edi
+
+    movl    %eax, (%edi,%esi,8)
+    movl    $0,   4(%edi,%esi,8)
+
     incl    %ecx
-    cmpl    $512, %ecx
-    jne     1b
+    cmpl    $2048, %ecx
+    jne     2b
 
     /* ------------------------------------------------------------------ */
     /* Step 3: Enable PAE + long mode + paging                            */
@@ -159,6 +194,7 @@ _start64:
 
     call    hal_init
     call    oberon_main
+    call    hal_display_flush   /* blit 1bpp shadow → VBE 8bpp LFB */
     call    hal_halt
 
 .Lhalt64:

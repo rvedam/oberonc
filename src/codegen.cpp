@@ -455,6 +455,22 @@ void CodeGen::loadModuleInterface(const std::string& alias,
         return; // parse failure → skip
     }
 
+    // Import exported constants as compile-time values in the symbol table.
+    auto* i64c = llvm::Type::getInt64Ty(ctx_);
+    for (auto& cd : importedMod.decls.consts) {
+        if (!cd.exported) continue;
+        std::string symKey = alias + "_" + cd.name;
+        if (lookupSym(symKey)) continue;
+        try {
+            int64_t val = evalConstInt(*cd.value);
+            Symbol sym;
+            sym.isConst = true;
+            sym.type    = typeTable_["INTEGER"];
+            sym.llvmVal = llvm::ConstantInt::get(i64c, val);
+            addSym(symKey, std::move(sym));
+        } catch (...) { /* skip non-integer-foldable constants */ }
+    }
+
     // Declare each exported procedure as an external LLVM function
     for (auto& pd : importedMod.decls.procs) {
         if (!pd->exported) continue;
@@ -490,6 +506,46 @@ void CodeGen::loadModuleInterface(const std::string& alias,
         auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                            fname, llvmMod_.get());
         extFuncs_[alias + "_" + pd->name] = fn;
+    }
+
+    // Declare each exported variable as an external LLVM global.
+    // Register in the symbol table as "alias_varName" so genAddr can find it.
+    auto* i64 = llvm::Type::getInt64Ty(ctx_);
+    for (auto& vd : importedMod.decls.vars) {
+        for (size_t ni = 0; ni < vd.names.size(); ++ni) {
+            if (ni < vd.exported.size() && !vd.exported[ni]) continue;
+            const std::string& vname = vd.names[ni];
+            std::string gname = modName + "_" + vname;
+            std::string symKey = alias + "_" + vname;
+            if (lookupSym(symKey)) continue; // already registered
+
+            // Resolve the LLVM type from the var's type expression
+            llvm::Type* lt = i64; // default INTEGER/SET
+            if (auto* q = dynamic_cast<const QualIdentType*>(vd.type.get())) {
+                auto it = typeTable_.find(q->ident);
+                if (it != typeTable_.end()) lt = toLLVM(it->second);
+            }
+
+            // Create (or reuse) an external global variable declaration
+            auto* gv = llvmMod_->getGlobalVariable(gname);
+            if (!gv)
+                gv = new llvm::GlobalVariable(*llvmMod_, lt,
+                         /*isConst=*/false, llvm::GlobalValue::ExternalLinkage,
+                         /*init=*/nullptr, gname);
+
+            // Determine the Oberon type
+            OberonTypePtr oty;
+            if (auto* q = dynamic_cast<const QualIdentType*>(vd.type.get())) {
+                auto it = typeTable_.find(q->ident);
+                if (it != typeTable_.end()) oty = it->second;
+            }
+            if (!oty) oty = typeTable_["INTEGER"];
+
+            Symbol sym;
+            sym.type    = oty;
+            sym.llvmVal = gv;
+            addSym(symKey, std::move(sym));
+        }
     }
 }
 
@@ -549,13 +605,17 @@ void CodeGen::genVarDecls(const std::vector<VarDecl>& decls, bool global) {
         OberonTypePtr ot = resolveType(*vd.type);
         llvm::Type*   lt = toLLVM(ot);
 
-        for (auto& name : vd.names) {
+        for (size_t ni = 0; ni < vd.names.size(); ++ni) {
+            const auto& name = vd.names[ni];
+            bool exported = (ni < vd.exported.size()) && vd.exported[ni];
+
             Symbol sym;
             sym.type    = ot;
             sym.isConst = false;
 
             if (global) {
-                // Module-level: create a global variable
+                // Module-level: create a global variable.
+                // Exported vars use ExternalLinkage so other modules can link to them.
                 std::string gname = modName_ + "_" + name;
                 llvm::Constant* init = nullptr;
                 if (lt->isIntegerTy())
@@ -568,9 +628,11 @@ void CodeGen::genVarDecls(const std::vector<VarDecl>& decls, bool global) {
                 else
                     init = llvm::ConstantAggregateZero::get(lt);
 
+                auto linkage = exported
+                    ? llvm::GlobalValue::ExternalLinkage
+                    : llvm::GlobalValue::InternalLinkage;
                 auto* gv = new llvm::GlobalVariable(
-                    *llvmMod_, lt, false,
-                    llvm::GlobalValue::InternalLinkage, init, gname);
+                    *llvmMod_, lt, false, linkage, init, gname);
                 sym.llvmVal = gv;
             } else {
                 // Procedure-local: create an alloca in the function entry block
@@ -733,6 +795,23 @@ void CodeGen::generate(const Module& mod) {
     b_->SetInsertPoint(entry);
 
     pushScope();
+
+    // When generating oberon_main (not --init-only), call each imported user
+    // module's init function in dependency order before running the module body.
+    // This mirrors Oberon's module initialisation sequence.
+    if (!moduleInitOnly_) {
+        auto* initTy = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), {}, false);
+        for (auto& [alias, depModName] : loadedUserModules_) {
+            std::string initName = depModName + "_init";
+            auto* initFn = llvmMod_->getFunction(initName);
+            if (!initFn)
+                initFn = llvm::Function::Create(
+                    initTy, llvm::Function::ExternalLinkage,
+                    initName, llvmMod_.get());
+            b_->CreateCall(initFn, {});
+        }
+    }
+
     genStmts(mod.body);
     if (!blockTerminated()) b_->CreateBr(exitBlock_);
 

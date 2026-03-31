@@ -49,6 +49,7 @@ _start:
 
     bl      hal_init
     bl      oberon_main
+    bl      hal_display_flush
     bl      hal_halt
 
     /* Should never reach here */
