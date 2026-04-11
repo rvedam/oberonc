@@ -727,8 +727,22 @@ void CodeGen::genProc(const ProcDecl& pd) {
     genConstDecls(pd.consts, /*global=*/false);
     genVarDecls  (pd.vars,   /*global=*/false);
     declareProcs (pd.procs);
-    for (auto& nestedProc : pd.procs)
-        genProc(*nestedProc);
+    // Save context before generating nested procedures: each genProc call clobbers
+    // curFunc_, exitBlock_, retAlloca_, and the IRBuilder insert point.
+    {
+        auto* savedFunc      = fn;
+        auto* savedExit      = exitBlock_;
+        auto* savedRet       = retAlloca_;
+        auto* savedInsertBB  = entry;   // the entry block of this proc
+
+        for (auto& nestedProc : pd.procs)
+            genProc(*nestedProc);
+
+        curFunc_    = savedFunc;
+        exitBlock_  = savedExit;
+        retAlloca_  = savedRet;
+        b_->SetInsertPoint(savedInsertBB);
+    }
 
     // Body
     genStmts(pd.body);

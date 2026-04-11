@@ -140,7 +140,14 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
                                       parseRealLit(rl->raw));
 
     if (auto* sl = dynamic_cast<const StringLitExpr*>(&e)) {
-        auto* gv = getOrCreateStrLit(parseStrContent(sl->raw));
+        std::string content = parseStrContent(sl->raw);
+        // Hex char constant (e.g. 0X, 0DX): always a CHAR value → return i8
+        bool isHexChar = !sl->raw.empty() && sl->raw.back() == 'X';
+        if (isHexChar) {
+            unsigned char cv = content.empty() ? '\0' : static_cast<unsigned char>(content[0]);
+            return llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), cv);
+        }
+        auto* gv = getOrCreateStrLit(content);
         return strLitPtr(gv);
     }
 
