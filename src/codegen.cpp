@@ -141,8 +141,14 @@ void CodeGen::registerBuiltins() {
 
 OberonTypePtr CodeGen::resolveTypeName(const std::string& mod,
                                         const std::string& name) {
-    // Ignore module qualifier for built-ins and local types in this pass
-    (void)mod;
+    if (!mod.empty()) {
+        // Try alias-qualified lookup first: "ModAlias_TypeName".
+        // Exported types from imported modules are registered under this key
+        // by loadModuleInterface.
+        auto it = typeTable_.find(mod + "_" + name);
+        if (it != typeTable_.end()) return it->second;
+    }
+    // Fall back to unqualified lookup (built-ins and local types).
     auto it = typeTable_.find(name);
     if (it != typeTable_.end()) return it->second;
     error("unknown type: " + (mod.empty() ? name : mod + "." + name));
@@ -545,6 +551,136 @@ void CodeGen::loadModuleInterface(const std::string& alias,
             sym.type    = oty;
             sym.llvmVal = gv;
             addSym(symKey, std::move(sym));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Import exported TYPE declarations.
+    //
+    // Two-pass approach (mirrors registerTypeDecls / fillTypeDecls):
+    //
+    // Pass 1 — create stubs for every exported type, registered under both
+    //   the alias-qualified key ("alias_TypeName", permanent) and a short key
+    //   ("TypeName", temporary).  The short key lets resolveType resolve
+    //   intra-module references (e.g. PointPtr → Point) during Pass 2.
+    //
+    // Pass 2 — call resolveType to fill in field lists, base types, etc.
+    //   Short-key entries are removed afterwards to avoid polluting the
+    //   current module's namespace.
+    // -----------------------------------------------------------------------
+
+    std::vector<std::string> importTempKeys; // short names removed after import
+
+    // Adds ot under "alias_short" (permanent) and "short" (temporary).
+    auto addStub = [&](const std::string& shortName, OberonTypePtr ot) {
+        std::string qualKey = alias + "_" + shortName;
+        if (!typeTable_.count(qualKey))
+            typeTable_[qualKey] = ot;
+        if (!typeTable_.count(shortName)) {
+            typeTable_[shortName] = ot;
+            importTempKeys.push_back(shortName);
+        }
+    };
+
+    // Pass 1: register minimal stubs so forward references resolve in Pass 2.
+    for (auto& td : importedMod.decls.types) {
+        if (!td.exported) continue;
+        std::string qualKey = alias + "_" + td.name;
+        if (typeTable_.count(qualKey)) continue;
+
+        OberonTypePtr stub = std::make_shared<OberonType>();
+        stub->name = td.name;
+
+        if (dynamic_cast<const RecordTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Record;
+            // Create a named LLVM struct so toLLVM can find it via the cache.
+            if (!llvm::StructType::getTypeByName(ctx_, qualKey))
+                llvm::StructType::create(ctx_, qualKey);
+            llvmTypeCache_[stub.get()] =
+                llvm::StructType::getTypeByName(ctx_, qualKey);
+        } else if (auto* p = dynamic_cast<const PointerTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Pointer;
+            if (auto* q = dynamic_cast<const QualIdentType*>(p->base.get()))
+                stub->ptrBaseName = q->ident;
+        } else if (dynamic_cast<const ProcedureTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Procedure;
+        } else if (dynamic_cast<const ArrayTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Array;
+        } else {
+            continue; // type alias or unsupported — skip
+        }
+        addStub(td.name, stub);
+    }
+
+    // Pass 2: fill in type bodies now that all stubs are visible by short name.
+    for (auto& td : importedMod.decls.types) {
+        if (!td.exported) continue;
+        std::string qualKey = alias + "_" + td.name;
+        auto existIt = typeTable_.find(qualKey);
+        if (existIt == typeTable_.end()) continue;
+        OberonTypePtr& stub = existIt->second;
+
+        try {
+            OberonTypePtr filled = resolveType(*td.type);
+            filled->name = td.name;
+
+            if (stub->kind == TypeKind::Record) {
+                // Fill the LLVM named-struct body (was opaque after Pass 1).
+                auto* st = llvm::dyn_cast_or_null<llvm::StructType>(
+                    llvm::StructType::getTypeByName(ctx_, qualKey));
+                if (st && st->isOpaque()) {
+                    std::vector<llvm::Type*> fts;
+                    for (auto& f : filled->fields)
+                        fts.push_back(toLLVM(f.type));
+                    st->setBody(fts);
+                }
+                // Update the stub in-place (other types may already hold a
+                // shared_ptr to it, so we must not replace the object).
+                stub->fields     = std::move(filled->fields);
+                stub->baseName   = std::move(filled->baseName);
+                stub->baseModule = std::move(filled->baseModule);
+            } else if (stub->kind == TypeKind::Pointer) {
+                stub->ptrBase     = filled->ptrBase;
+                stub->ptrBaseName = filled->ptrBaseName;
+                if (stub->ptrBase)
+                    llvmTypeCache_[stub.get()] =
+                        llvm::PointerType::get(toLLVM(stub->ptrBase), 0);
+            } else if (stub->kind == TypeKind::Procedure) {
+                stub->params  = std::move(filled->params);
+                stub->retType = std::move(filled->retType);
+            } else if (stub->kind == TypeKind::Array) {
+                stub->isOpen = filled->isOpen;
+                stub->length = filled->length;
+                stub->elem   = std::move(filled->elem);
+            }
+        } catch (...) {
+            // Dependency unavailable (e.g. type from a transitively imported
+            // module that wasn't loaded).  Leave the stub as-is; callers that
+            // actually use this type will get a more specific error.
+        }
+    }
+
+    // Remove temporary short-name entries so they don't collide with the
+    // current module's own declarations.
+    for (auto& k : importTempKeys) typeTable_.erase(k);
+
+    // Resolve any pointer forward-references that Pass 2 left unresolved
+    // (happens when the pointer's base type wasn't yet a stub when the pointer
+    // type was filled in, e.g. due to declaration order).
+    // Only iterate over the types we just imported (alias_ prefix) to avoid
+    // triggering infinite recursion through unrelated types in typeTable_.
+    std::string aliasPrefix = alias + "_";
+    for (auto& [name, ot] : typeTable_) {
+        if (name.substr(0, aliasPrefix.size()) != aliasPrefix) continue;
+        if (ot->kind != TypeKind::Pointer || ot->ptrBase || ot->ptrBaseName.empty())
+            continue;
+        // Prefer the alias-qualified base, fall back to unqualified.
+        auto it = typeTable_.find(alias + "_" + ot->ptrBaseName);
+        if (it == typeTable_.end()) it = typeTable_.find(ot->ptrBaseName);
+        if (it != typeTable_.end()) {
+            ot->ptrBase = it->second;
+            llvmTypeCache_[ot.get()] =
+                llvm::PointerType::get(toLLVM(ot->ptrBase), 0);
         }
     }
 }

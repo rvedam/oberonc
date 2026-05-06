@@ -397,11 +397,37 @@ ExprPtr Parser::parseFactor() {
     }
     case TokenKind::Ident: {
         // designator [ActualParameters]
+        // Also handles type guard selectors: "(qualident)" followed by more selectors.
+        // Per Oberon-07, "(qualident)" is a designator selector when followed by
+        // another selector (".", "[", "^", "(").  We detect this after the fact:
+        // if ActualParameters contain exactly one plain qualident AND the next token
+        // is a selector, fold it as TypeGuardSelector and continue parsing selectors.
         auto node   = std::make_unique<DesignatorExpr>();
         node->loc   = l;
         node->desig = parseDesignator();
-        if (kind() == TokenKind::LParen)
-            node->args = parseActualParameters();
+        while (kind() == TokenKind::LParen) {
+            auto args = parseActualParameters();
+            bool isTypeGuard = false;
+            if (args && args->size() == 1) {
+                auto* argDE = dynamic_cast<const DesignatorExpr*>(args->at(0).get());
+                if (argDE && !argDE->args && argDE->desig->selectors.empty()) {
+                    TokenKind nk = kind();
+                    if (nk == TokenKind::Dot || nk == TokenKind::LBracket ||
+                        nk == TokenKind::Caret || nk == TokenKind::LParen) {
+                        // Type guard: fold into the designator and continue.
+                        node->desig->selectors.push_back(TypeGuardSelector{
+                            argDE->desig->ident, argDE->desig->module,
+                            argDE->desig->loc});
+                        parsePostSelectors(*node->desig);
+                        isTypeGuard = true;
+                    }
+                }
+            }
+            if (!isTypeGuard) {
+                node->args = std::move(args);
+                break;
+            }
+        }
         return node;
     }
     default:
@@ -476,6 +502,33 @@ DesignPtr Parser::parseDesignator() {
     return d;
 }
 
+// parsePostSelectors — append "." ident, "[" ExpList "]", and "^" selectors to d.
+// Called after a type guard "(qualident)" has been folded into a designator;
+// continues consuming selectors until a "(" or non-selector token is seen.
+void Parser::parsePostSelectors(Designator& d) {
+    while (true) {
+        if (kind() == TokenKind::Dot) {
+            SourceLoc sl = cur_.loc;
+            advance();
+            std::string field = parseIdent();
+            d.selectors.push_back(FieldSelector{field, sl});
+        } else if (kind() == TokenKind::LBracket) {
+            SourceLoc sl = cur_.loc;
+            advance();
+            auto list = parseExpList();
+            expect(TokenKind::RBracket);
+            for (auto& idx : list)
+                d.selectors.push_back(IndexSelector{std::move(idx), sl});
+        } else if (kind() == TokenKind::Caret) {
+            SourceLoc sl = cur_.loc;
+            advance();
+            d.selectors.push_back(DerefSelector{sl});
+        } else {
+            break;
+        }
+    }
+}
+
 // ActualParameters = "(" [ExpList] ")"
 std::optional<std::vector<ExprPtr>> Parser::parseActualParameters() {
     expect(TokenKind::LParen);
@@ -525,23 +578,56 @@ StmtPtr Parser::parseStatement() {
     case TokenKind::For:    return parseForStatement();
 
     case TokenKind::Ident: {
-        // Could be assignment or procedure call
+        // Could be assignment or procedure call.
+        // Also handles type guard selectors in assignment LHS: "v(T).field := expr".
         DesignPtr d = parseDesignator();
+
+        // Resolve any type guard selectors "(qualident)" that are part of the
+        // designator.  A "(qualident)" followed by a selector or ":=" is a type
+        // guard (Oberon-07 designator selector), not ActualParameters.
+        while (kind() == TokenKind::LParen) {
+            auto args = parseActualParameters();
+            bool promoted = false;
+            if (args && args->size() == 1) {
+                auto* argDE = dynamic_cast<const DesignatorExpr*>(args->at(0).get());
+                if (argDE && !argDE->args && argDE->desig->selectors.empty()) {
+                    TokenKind nk = kind();
+                    if (nk == TokenKind::Dot || nk == TokenKind::LBracket ||
+                        nk == TokenKind::Caret || nk == TokenKind::LParen ||
+                        nk == TokenKind::Assign) {
+                        // Type guard: fold into the designator.
+                        d->selectors.push_back(TypeGuardSelector{
+                            argDE->desig->ident, argDE->desig->module,
+                            argDE->desig->loc});
+                        if (nk != TokenKind::Assign)
+                            parsePostSelectors(*d);
+                        promoted = true;
+                    }
+                }
+            }
+            if (!promoted) {
+                // Not a type guard: procedure call statement.
+                auto s  = std::make_unique<ProcCallStmt>();
+                s->loc  = l;
+                s->desig = std::move(d);
+                s->args  = std::move(args);
+                return s;
+            }
+        }
+
         if (kind() == TokenKind::Assign) {
             // assignment = designator ":=" expression
             advance();
-            auto s     = std::make_unique<AssignStmt>();
-            s->loc     = l;
-            s->target  = std::move(d);
-            s->value   = parseExpression();
+            auto s    = std::make_unique<AssignStmt>();
+            s->loc    = l;
+            s->target = std::move(d);
+            s->value  = parseExpression();
             return s;
         } else {
             // ProcedureCall = designator [ActualParameters]
             auto s  = std::make_unique<ProcCallStmt>();
             s->loc  = l;
             s->desig = std::move(d);
-            if (kind() == TokenKind::LParen)
-                s->args = parseActualParameters();
             return s;
         }
     }

@@ -99,4 +99,8 @@ private:
     std::optional<BinaryOp> tryRelation();
     std::optional<BinaryOp> tryAddOperator();
     std::optional<BinaryOp> tryMulOperator();
+
+    // Append additional selectors ("." ident | "[" ExpList "]" | "^") to d.
+    // Stops at "(" (left to the caller to handle as type guard or ActualParameters).
+    void parsePostSelectors(Designator& d);
 };

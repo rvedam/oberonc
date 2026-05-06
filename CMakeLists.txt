@@ -71,9 +71,20 @@ add_executable(oberonc_tests
 )
 target_link_libraries(oberonc_tests PRIVATE oberonc_lib Catch2::Catch2WithMain)
 
+# ---- Test executable (codegen — requires LLVM) ----------------------------
+add_executable(oberonc_codegen_tests
+    tests/test_codegen.cpp
+)
+target_link_libraries(oberonc_codegen_tests PRIVATE oberonc_codegen Catch2::Catch2WithMain)
+# Inject the absolute path to the tests/ directory so test fixtures are findable
+# regardless of working directory.
+target_compile_definitions(oberonc_codegen_tests PRIVATE
+    TEST_MODULE_DIR="${CMAKE_SOURCE_DIR}/tests")
+
 include(CTest)
 include(Catch)
 catch_discover_tests(oberonc_tests)
+catch_discover_tests(oberonc_codegen_tests)
 
 # ---- Architecture selection for bare-metal targets --------------------------
 set(KERNEL_ARCH "x86_64" CACHE STRING
