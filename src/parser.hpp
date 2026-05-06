@@ -23,7 +23,7 @@ public:
     explicit Parser(Lexer& lexer);
 
     // Parse a full compilation unit.
-    Module parseModule();
+    [[nodiscard]] Module parseModule();
 
 private:
     Lexer&  lex_;

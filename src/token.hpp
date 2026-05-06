@@ -62,8 +62,8 @@ struct Token {
     std::string text;   // raw source text of the token
     SourceLoc   loc;
 
-    bool is(TokenKind k)  const { return kind == k; }
-    bool isNot(TokenKind k) const { return kind != k; }
+    [[nodiscard]] bool is(TokenKind k)    const { return kind == k; }
+    [[nodiscard]] bool isNot(TokenKind k) const { return kind != k; }
 };
 
 // Human-readable name, useful in error messages

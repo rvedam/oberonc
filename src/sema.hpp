@@ -61,13 +61,13 @@ struct OberonType {
     OberonTypePtr          retType; // nullptr = void
 
     // Helper: index of field by name (-1 if not found)
-    int fieldIndex(const std::string& n) const {
+    [[nodiscard]] int fieldIndex(const std::string& n) const {
         for (int i = 0; i < static_cast<int>(fields.size()); ++i)
             if (fields[i].name == n) return i;
         return -1;
     }
 
-    bool isScalar() const {
+    [[nodiscard]] bool isScalar() const {
         return kind == TypeKind::Integer || kind == TypeKind::Real  ||
                kind == TypeKind::Boolean || kind == TypeKind::Char  ||
                kind == TypeKind::Byte    || kind == TypeKind::Set;

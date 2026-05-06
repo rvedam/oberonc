@@ -28,9 +28,9 @@ private:
     int              col_  = 1;
 
     // Low-level character access
-    char  peek(int offset = 0) const;
-    char  advance();
-    bool  atEnd() const;
+    [[nodiscard]] char peek(int offset = 0) const noexcept;
+    char advance() noexcept;
+    [[nodiscard]] bool atEnd() const noexcept;
 
     // Skip whitespace and nested comments
     void skipWhitespaceAndComments();

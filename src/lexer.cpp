@@ -122,19 +122,19 @@ const char* tokenKindName(TokenKind k) {
 Lexer::Lexer(std::string_view source, std::string filename)
     : src_(source), filename_(std::move(filename)) {}
 
-char Lexer::peek(int offset) const {
+char Lexer::peek(int offset) const noexcept {
     std::size_t idx = pos_ + static_cast<std::size_t>(offset);
     return (idx < src_.size()) ? src_[idx] : '\0';
 }
 
-char Lexer::advance() {
+char Lexer::advance() noexcept {
     char c = src_[pos_++];
     if (c == '\n') { ++line_; col_ = 1; }
     else           { ++col_; }
     return c;
 }
 
-bool Lexer::atEnd() const { return pos_ >= src_.size(); }
+bool Lexer::atEnd() const noexcept { return pos_ >= src_.size(); }
 
 // Skip whitespace and nested Oberon comments (* ... *)
 void Lexer::skipWhitespaceAndComments() {
