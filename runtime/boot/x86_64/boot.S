@@ -13,13 +13,34 @@
  * tries to walk the by-then-zeroed page tables.
  */
 
+/* Multiboot2: recognized by GRUB2 */
 .set MULTIBOOT2_MAGIC,    0xE85250D6
 .set MULTIBOOT2_ARCH_I386, 0
 .set MULTIBOOT2_HDRLEN,   16
 .set MULTIBOOT2_CHECKSUM, -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH_I386 + MULTIBOOT2_HDRLEN)
 
 /* -----------------------------------------------------------------------
+ * PVH ELF note (for QEMU -kernel direct boot without GRUB)
+ *
+ * QEMU 7.2+ requires either a PVH note or a Multiboot1 header to load
+ * a kernel via -kernel.  Multiboot1 rejects 64-bit ELFs, so we use the
+ * Xen PVH protocol: a PT_NOTE segment carrying XEN_ELFNOTE_PHYS32_ENTRY
+ * (type 18).  QEMU reads the 32-bit entry address, loads all PT_LOAD
+ * segments, and jumps to that address in 32-bit protected mode — exactly
+ * the state Multiboot2/GRUB also delivers.
+ * ----------------------------------------------------------------------- */
+.section .note.xen, "a", @note
+.align 4
+pvh_note:
+    .long  4               /* namesz: 4 bytes for "Xen\0" */
+    .long  4               /* descsz: 4 bytes for the entry point */
+    .long  18              /* type:   XEN_ELFNOTE_PHYS32_ENTRY  */
+    .ascii "Xen\0"         /* name (already 4-byte aligned)     */
+    .long  _start          /* 32-bit physical entry point       */
+
+/* -----------------------------------------------------------------------
  * Multiboot2 header (must be within the first 32 KiB, 8-byte aligned)
+ * Kept for GRUB2 boot compatibility.
  * ----------------------------------------------------------------------- */
 .section .multiboot2, "a"
 .align 8

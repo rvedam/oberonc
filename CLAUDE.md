@@ -101,7 +101,7 @@ The `kernel` target assembles `tests/Hello.ll` with `llc`/`llc-14`, links the bo
 ### Running with QEMU
 
 ```bash
-# x86-64: serial output on stdio; Multiboot2 via GRUB/QEMU direct kernel boot
+# x86-64: serial output on stdio; PVH note for QEMU -kernel direct boot
 qemu-system-x86_64 -kernel build/kernel_x86_64.elf \
     -serial stdio -display none -no-reboot
 
