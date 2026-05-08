@@ -1,14 +1,6 @@
 #include "parser.hpp"
 #include <cassert>
-#include <sstream>
-
-// Simple formatting helper for compilers without <format>
-template<typename... Args>
-static std::string fmt(Args&&... args) {
-    std::ostringstream ss;
-    (ss << ... << args);
-    return ss.str();
-}
+#include <format>
 
 // -----------------------------------------------------------------------
 // Constructor / token management
@@ -34,13 +26,13 @@ bool Parser::match(TokenKind k) {
 }
 
 void Parser::error(const std::string& msg) {
-    throw ParseError(fmt(lex_.filename(), ":", cur_.loc.line,
-        ":", cur_.loc.column, ": ", msg));
+    throw ParseError(std::format("{}:{}:{}: {}",
+        lex_.filename(), cur_.loc.line, cur_.loc.column, msg));
 }
 
 void Parser::errorExpected(const std::string& what) {
-    error(fmt("expected ", what, " but got '",
-        (cur_.text.empty() ? tokenKindName(cur_.kind) : cur_.text), "'"));
+    error(std::format("expected {} but got '{}'",
+        what, (cur_.text.empty() ? tokenKindName(cur_.kind) : cur_.text)));
 }
 
 // -----------------------------------------------------------------------
@@ -907,8 +899,8 @@ std::shared_ptr<ProcDecl> Parser::parseProcedureDeclaration() {
     // Trailing ident must match procedure name
     std::string closing = parseIdent();
     if (closing != node->name)
-        error(fmt("closing identifier '", closing,
-            "' does not match procedure name '", node->name, "'"));
+        error(std::format("closing identifier '{}' does not match procedure name '{}'",
+            closing, node->name));
     return node;
 }
 
@@ -955,8 +947,8 @@ Module Parser::parseModule() {
 
     std::string closing = parseIdent();
     if (closing != m.name)
-        error(fmt("closing identifier '", closing,
-            "' does not match module name '", m.name, "'"));
+        error(std::format("closing identifier '{}' does not match module name '{}'",
+            closing, m.name));
     expect(TokenKind::Dot);
 
     return m;

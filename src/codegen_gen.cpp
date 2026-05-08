@@ -12,7 +12,7 @@
 OberonTypePtr CodeGen::typeOfDesig(const Designator& d) {
     OberonTypePtr ty;
 
-    if (!d.module.empty() && !importedModules_.count(d.module)) {
+    if (!d.module.empty() && !importedModules_.contains(d.module)) {
         // module is actually a record variable name
         auto* sym = lookupSym(d.module);
         if (!sym) error("unknown symbol: " + d.module);
@@ -48,7 +48,7 @@ CodeGen::AddrResult CodeGen::genAddr(const Designator& d) {
     llvm::Value*  base = nullptr;
     OberonTypePtr ty;
 
-    if (!d.module.empty() && !importedModules_.count(d.module)) {
+    if (!d.module.empty() && !importedModules_.contains(d.module)) {
         // r.x  where r is a local/global record variable
         auto* sym = lookupSym(d.module);
         if (!sym) error("unknown symbol: " + d.module);
@@ -70,7 +70,7 @@ CodeGen::AddrResult CodeGen::genAddr(const Designator& d) {
     } else {
         // If d.module names an imported module, the exported var was registered
         // in the symbol table as "module_ident".
-        std::string key = (!d.module.empty() && importedModules_.count(d.module))
+        std::string key = (!d.module.empty() && importedModules_.contains(d.module))
                           ? (d.module + "_" + d.ident)
                           : d.ident;
         auto* sym = lookupSym(key);
@@ -344,7 +344,7 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
         // constants AND variables imported via loadModuleInterface).
         auto* sym = [&]() -> Symbol* {
             if (!de->desig->module.empty() &&
-                importedModules_.count(de->desig->module)) {
+                importedModules_.contains(de->desig->module)) {
                 auto* s = lookupSym(de->desig->module + "_" + de->desig->ident);
                 if (s) return s;
             }
@@ -683,7 +683,7 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
 
     // Indirect call through a procedure variable or record field
     {
-        bool isFieldCall = !d.module.empty() && !importedModules_.count(d.module);
+        bool isFieldCall = !d.module.empty() && !importedModules_.contains(d.module);
         Symbol* procSym  = nullptr;
         if (!isFieldCall && d.module.empty())
             procSym = lookupSym(d.ident);
@@ -723,7 +723,7 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
 
     // Resolve function (direct call)
     llvm::Function* fn = nullptr;
-    if (!d.module.empty() && importedModules_.count(d.module)) {
+    if (!d.module.empty() && importedModules_.contains(d.module)) {
         // Imported: Out.String → Out_String
         std::string key = d.module + "_" + d.ident;
         auto it = extFuncs_.find(key);
@@ -912,7 +912,7 @@ void CodeGen::genCall(const ProcCallStmt& s) {
     //   (b) d.module is empty but d.ident is a local symbol of Procedure type —
     //       e.g., a bare procedure-variable call p(…).
     {
-        bool isFieldCall = !d.module.empty() && !importedModules_.count(d.module);
+        bool isFieldCall = !d.module.empty() && !importedModules_.contains(d.module);
         Symbol* procSym  = nullptr;
         if (!isFieldCall && d.module.empty())
             procSym = lookupSym(d.ident);
@@ -953,7 +953,7 @@ void CodeGen::genCall(const ProcCallStmt& s) {
 
     // Regular procedure call — resolve the function and build args directly.
     llvm::Function* fn = nullptr;
-    if (!d.module.empty() && importedModules_.count(d.module)) {
+    if (!d.module.empty() && importedModules_.contains(d.module)) {
         std::string key = d.module + "_" + d.ident;
         auto it = extFuncs_.find(key);
         if (it != extFuncs_.end()) fn = it->second;

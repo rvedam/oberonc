@@ -574,9 +574,9 @@ void CodeGen::loadModuleInterface(const std::string& alias,
     // Adds ot under "alias_short" (permanent) and "short" (temporary).
     auto addStub = [&](const std::string& shortName, OberonTypePtr ot) {
         std::string qualKey = alias + "_" + shortName;
-        if (!typeTable_.count(qualKey))
+        if (!typeTable_.contains(qualKey))
             typeTable_[qualKey] = ot;
-        if (!typeTable_.count(shortName)) {
+        if (!typeTable_.contains(shortName)) {
             typeTable_[shortName] = ot;
             importTempKeys.push_back(shortName);
         }
@@ -586,7 +586,7 @@ void CodeGen::loadModuleInterface(const std::string& alias,
     for (auto& td : importedMod.decls.types) {
         if (!td.exported) continue;
         std::string qualKey = alias + "_" + td.name;
-        if (typeTable_.count(qualKey)) continue;
+        if (typeTable_.contains(qualKey)) continue;
 
         OberonTypePtr stub = std::make_shared<OberonType>();
         stub->name = td.name;

@@ -43,7 +43,7 @@ public:
     void setModuleInitOnly(bool v) { moduleInitOnly_ = v; }
 
     // Names of user modules that were successfully loaded (alias → modName)
-    const std::vector<std::pair<std::string,std::string>>& loadedUserModules() const {
+    [[nodiscard]] const std::vector<std::pair<std::string,std::string>>& loadedUserModules() const {
         return loadedUserModules_;
     }
 
