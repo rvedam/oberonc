@@ -55,6 +55,30 @@ if(ENABLE_ASAN)
     target_link_options(oberonc           PRIVATE -fsanitize=address,undefined)
 endif()
 
+# ---- Optional: Valgrind memcheck ------------------------------------------
+option(ENABLE_VALGRIND "Add valgrind_tests target for memcheck" OFF)
+if(ENABLE_VALGRIND)
+    find_program(VALGRIND valgrind REQUIRED)
+    set(VALGRIND_BASE
+        ${VALGRIND}
+        --error-exitcode=1
+        --track-origins=yes
+        --num-callers=20)
+    # Parser/lexer suite: no LLVM globals — check all leak kinds
+    set(VALGRIND_PARSER  ${VALGRIND_BASE} --leak-check=full)
+    # Codegen suite: LLVM has benign "still reachable" singletons —
+    # only report definite/indirect leaks to avoid false positives
+    set(VALGRIND_CODEGEN ${VALGRIND_BASE} --leak-check=full
+        --show-leak-kinds=definite,indirect)
+
+    add_custom_target(valgrind_tests
+        COMMAND ${VALGRIND_PARSER}  $<TARGET_FILE:oberonc_tests>
+        COMMAND ${VALGRIND_CODEGEN} $<TARGET_FILE:oberonc_codegen_tests>
+        DEPENDS oberonc_tests oberonc_codegen_tests
+        COMMENT "Running test suites under Valgrind memcheck"
+        USES_TERMINAL)
+endif()
+
 # ---- Catch2 via FetchContent -----------------------------------------------
 include(FetchContent)
 FetchContent_Declare(
