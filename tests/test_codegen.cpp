@@ -3,6 +3,7 @@
 #include "parser.hpp"
 #include "codegen.hpp"
 
+#include <array>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -26,7 +27,7 @@ static std::string tryCompile(const std::string& src,
         Parser parser(lex);
         Module mod = parser.parseModule();
         CodeGen cg(mod.name);
-        cg.setModulePaths({modDir});
+        cg.setModulePaths(std::array<std::string, 1>{modDir});
         cg.generate(mod);
         return "";
     } catch (const std::runtime_error& e) {

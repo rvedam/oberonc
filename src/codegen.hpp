@@ -9,11 +9,12 @@
 #include <llvm/IR/Function.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
 
 // -----------------------------------------------------------------------
 // Oberon-07 → LLVM IR code generator
@@ -36,7 +37,9 @@ public:
     void writeIR(const std::string& path);
     void writeIR(llvm::raw_ostream& os);
     void writeObject(const std::string& path); // emit native object file
-    void setModulePaths(const std::vector<std::string>& paths) { modulePaths_ = paths; }
+    void setModulePaths(std::span<const std::string> paths) {
+        modulePaths_.assign(paths.begin(), paths.end());
+    }
     void setModuleInitOnly(bool v) { moduleInitOnly_ = v; }
 
     // Names of user modules that were successfully loaded (alias → modName)
@@ -53,8 +56,8 @@ private:
 
     // ---- Semantic state ----
     std::set<std::string>                   importedModules_;
-    std::map<std::string, OberonTypePtr>    typeTable_;
-    std::map<OberonType*, llvm::Type*>      llvmTypeCache_;
+    std::unordered_map<std::string, OberonTypePtr>    typeTable_;
+    std::unordered_map<OberonType*, llvm::Type*>      llvmTypeCache_;
 
     // ---- Module search paths (for resolving imports) ----
     std::vector<std::string>                modulePaths_;
@@ -69,14 +72,14 @@ private:
         bool          isConst  = false;
         bool          isVar    = false; // VAR param – llvmVal is already a ptr
     };
-    using Scope = std::map<std::string, Symbol>;
+    using Scope = std::unordered_map<std::string, Symbol>;
     std::vector<Scope> scopes_;
 
     // ---- String literal dedup ----
-    std::map<std::string, llvm::GlobalVariable*> strLiterals_;
+    std::unordered_map<std::string, llvm::GlobalVariable*> strLiterals_;
 
     // ---- External / imported functions ----
-    std::map<std::string, llvm::Function*> extFuncs_;
+    std::unordered_map<std::string, llvm::Function*> extFuncs_;
 
     // ---- Per-function state ----
     llvm::Function*   curFunc_    = nullptr;

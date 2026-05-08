@@ -63,7 +63,8 @@ void CodeGen::writeObject(const std::string& path) {
 
     llvm::TargetOptions opt;
     auto rm = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
-    auto* tm = target->createTargetMachine(targetTriple, "generic", "", opt, rm);
+    auto tm = std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(targetTriple, "generic", "", opt, rm));
     llvmMod_->setDataLayout(tm->createDataLayout());
 
     std::error_code ec;
@@ -76,7 +77,6 @@ void CodeGen::writeObject(const std::string& path) {
 
     pm.run(*llvmMod_);
     dest.flush();
-    delete tm;
 }
 
 // -----------------------------------------------------------------------

@@ -2,12 +2,14 @@
 #include "parser.hpp"
 #include "codegen.hpp"
 
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <filesystem>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 
 static std::string readFile(const std::string& path) {
     std::ifstream f(path);
@@ -21,7 +23,7 @@ static std::string readFile(const std::string& path) {
 }
 
 // Derive a stem path (no extension) from the input file
-static std::string stemPath(const std::string& input) {
+static std::string stemPath(std::string_view input) {
     std::filesystem::path p(input);
     return (p.parent_path() / p.stem()).string();
 }
@@ -57,7 +59,7 @@ static std::string compileToObject(const std::string& modSrcPath) {
     CodeGen cg(mod.name);
     std::string dir = p.parent_path().string();
     if (dir.empty()) dir = ".";
-    cg.setModulePaths({dir});
+    cg.setModulePaths(std::array<std::string, 1>{dir});
     cg.setModuleInitOnly(true); // don't emit oberon_main for imported modules
     cg.generate(mod);
 
@@ -82,7 +84,7 @@ int main(int argc, char* argv[]) {
     std::string srcPath;
 
     for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
+        std::string_view a = argv[i];
         if (a == "--emit-llvm") {
             emitLLVM = true;
         } else if (a == "--init-only") {
@@ -114,7 +116,7 @@ int main(int argc, char* argv[]) {
         // Pass the source file's directory so imports can be resolved
         std::string srcDir = std::filesystem::path(srcPath).parent_path().string();
         if (srcDir.empty()) srcDir = ".";
-        cg.setModulePaths({srcDir});
+        cg.setModulePaths(std::array<std::string, 1>{srcDir});
         if (initOnly) cg.setModuleInitOnly(true);
         cg.generate(mod);
 
