@@ -9,7 +9,11 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/FileSystem.h>
+#if __has_include(<llvm/TargetParser/Host.h>)   // LLVM 17+
+#include <llvm/TargetParser/Host.h>
+#else
 #include <llvm/Support/Host.h>
+#endif
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Target/TargetMachine.h>
@@ -62,7 +66,7 @@ void CodeGen::writeObject(const std::string& path) {
         throw std::runtime_error("LLVM target lookup failed: " + err);
 
     llvm::TargetOptions opt;
-    auto rm = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+    auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
     auto tm = std::unique_ptr<llvm::TargetMachine>(
         target->createTargetMachine(targetTriple, "generic", "", opt, rm));
     llvmMod_->setDataLayout(tm->createDataLayout());
@@ -72,7 +76,7 @@ void CodeGen::writeObject(const std::string& path) {
     if (ec) throw std::runtime_error("cannot open object output: " + ec.message());
 
     llvm::legacy::PassManager pm;
-    if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CGFT_ObjectFile))
+    if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile))
         throw std::runtime_error("LLVM cannot emit object file for this target");
 
     pm.run(*llvmMod_);
@@ -288,6 +292,18 @@ llvm::Type* CodeGen::toLLVM(OberonTypePtr t) {
     }
     if (result) llvmTypeCache_[t.get()] = result;
     return result;
+}
+
+llvm::FunctionType* CodeGen::toLLVMFunctionType(OberonTypePtr t) {
+    assert(t && t->kind == TypeKind::Procedure);
+    std::vector<llvm::Type*> pts;
+    for (auto& p : t->params) {
+        llvm::Type* pt = toLLVM(p.type);
+        if (p.isVar) pt = llvm::PointerType::get(pt, 0);
+        pts.push_back(pt);
+    }
+    auto* rty = t->retType ? toLLVM(t->retType) : llvm::Type::getVoidTy(ctx_);
+    return llvm::FunctionType::get(rty, pts, false);
 }
 
 // -----------------------------------------------------------------------

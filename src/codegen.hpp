@@ -92,7 +92,8 @@ private:
     void          registerBuiltins();
     OberonTypePtr resolveTypeName(const std::string& mod, const std::string& name);
     OberonTypePtr resolveType(const TypeExpr& te);
-    llvm::Type*   toLLVM(OberonTypePtr t);
+    llvm::Type*         toLLVM(OberonTypePtr t);
+    llvm::FunctionType* toLLVMFunctionType(OberonTypePtr t); // unwrapped fn type for indirect calls
 
     // Two-pass type declaration processing
     void registerTypeDecls(const std::vector<TypeDecl>& decls); // pass 1: stubs

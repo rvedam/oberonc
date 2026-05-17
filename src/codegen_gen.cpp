@@ -695,9 +695,8 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
             if (!procTy || procTy->kind != TypeKind::Procedure)
                 error("indirect call on non-procedure type: " + d.ident);
             auto* fnptrLLVM = toLLVM(procTy);
+            auto* fty       = toLLVMFunctionType(procTy);
             auto* fnptr     = b_->CreateLoad(fnptrLLVM, addr, "fnptr");
-            auto* fty       = llvm::cast<llvm::FunctionType>(
-                fnptrLLVM->getPointerElementType());
             std::vector<llvm::Value*> args;
             if (de.args) {
                 for (size_t i = 0; i < de.args->size(); ++i) {
@@ -923,10 +922,9 @@ void CodeGen::genCall(const ProcCallStmt& s) {
                                               : AddrResult{procSym->llvmVal, procSym->type};
             if (!procTy || procTy->kind != TypeKind::Procedure)
                 error("indirect call on non-procedure type: " + d.ident);
-            auto* fnptrLLVM = toLLVM(procTy);                          // ptr-to-FunctionType
+            auto* fnptrLLVM = toLLVM(procTy);
+            auto* fty       = toLLVMFunctionType(procTy);
             auto* fnptr     = b_->CreateLoad(fnptrLLVM, addr, "fnptr");
-            auto* fty       = llvm::cast<llvm::FunctionType>(
-                fnptrLLVM->getPointerElementType());
             std::vector<llvm::Value*> args;
             if (s.args) {
                 for (size_t i = 0; i < s.args->size(); ++i) {
