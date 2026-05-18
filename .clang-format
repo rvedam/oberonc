@@ -1,0 +1,8 @@
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+PointerAlignment: Left
+ColumnLimit: 100
+BreakConstructorInitializers: BeforeComma
+AllowShortFunctionsOnASingleLine: Empty
+SortIncludes: false
