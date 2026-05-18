@@ -36,6 +36,9 @@ OberonTypePtr CodeGen::typeOfDesig(const Designator& d) {
             if (ty->kind == TypeKind::Array) ty = ty->elem;
         } else if (std::get_if<DerefSelector>(&sel)) {
             if (ty->kind == TypeKind::Pointer) ty = ty->ptrBase;
+        } else if (auto* tgs = std::get_if<TypeGuardSelector>(&sel)) {
+            OberonTypePtr g = resolveTypeName(tgs->module, tgs->qualident);
+            if (g) ty = g;
         }
     }
     return ty;
@@ -119,8 +122,18 @@ CodeGen::AddrResult CodeGen::genAddr(const Designator& d) {
                 error("dereference on non-pointer");
             base = b_->CreateLoad(toLLVM(ty), base, "deref");
             ty   = ty->ptrBase;
+        } else if (auto* tgs = std::get_if<TypeGuardSelector>(&sel)) {
+            // Type guard v(T): reinterpret the current base as a pointer to T.
+            // Emit a bitcast so subsequent field GEPs use T's struct layout.
+            OberonTypePtr g = resolveTypeName(tgs->module, tgs->qualident);
+            if (g) {
+                llvm::Type* newLLVMTy = toLLVM(g);
+                llvm::Type* newPtrTy  = llvm::PointerType::get(newLLVMTy, 0);
+                if (base->getType() != newPtrTy)
+                    base = b_->CreateBitCast(base, newPtrTy, "typeguard");
+                ty = g;
+            }
         }
-        // TypeGuardSelector: ignore (semantic phase resolves this)
     }
 
     return {base, ty};
@@ -678,6 +691,29 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
             auto* x = coerce(genExpr(*args[0]), i64);
             auto* n = coerce(genExpr(*args[1]), i64);
             return b_->CreateAShr(x, n);
+        }
+    }
+
+    // Type guard in expression position: v(T) or v.field(T) where T is a type.
+    // The parser can't distinguish this from a call when ) is followed by END/ELSE/etc.
+    // Detect by checking whether the single "argument" resolves to a type, not a value.
+    if (de.args && de.args->size() == 1) {
+        auto* argDE = dynamic_cast<const DesignatorExpr*>(de.args->at(0).get());
+        if (argDE && !argDE->args && argDE->desig->selectors.empty()) {
+            std::string guardKey = argDE->desig->module.empty()
+                ? argDE->desig->ident
+                : argDE->desig->module + "_" + argDE->desig->ident;
+            auto guardIt = typeTable_.find(guardKey);
+            if (guardIt == typeTable_.end() && !argDE->desig->module.empty())
+                guardIt = typeTable_.find(argDE->desig->ident);
+            if (guardIt != typeTable_.end() &&
+                (guardIt->second->kind == TypeKind::Record ||
+                 guardIt->second->kind == TypeKind::Pointer)) {
+                OberonTypePtr guardType = guardIt->second;
+                auto [addr, baseTy] = genAddr(d);
+                llvm::Value* val = b_->CreateLoad(toLLVM(baseTy), addr, "tg_val");
+                return b_->CreateBitCast(val, toLLVM(guardType), "typeguard");
+            }
         }
     }
 

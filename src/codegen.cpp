@@ -66,7 +66,11 @@ void CodeGen::writeObject(const std::string& path) {
         throw std::runtime_error("LLVM target lookup failed: " + err);
 
     llvm::TargetOptions opt;
+#if __has_include(<llvm/TargetParser/Host.h>)  // LLVM 17+
     auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+#else  // LLVM 14
+    auto rm = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+#endif
     auto tm = std::unique_ptr<llvm::TargetMachine>(
         target->createTargetMachine(targetTriple, "generic", "", opt, rm));
     llvmMod_->setDataLayout(tm->createDataLayout());
@@ -76,7 +80,11 @@ void CodeGen::writeObject(const std::string& path) {
     if (ec) throw std::runtime_error("cannot open object output: " + ec.message());
 
     llvm::legacy::PassManager pm;
+#if __has_include(<llvm/TargetParser/Host.h>)  // LLVM 17+
     if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile))
+#else  // LLVM 14
+    if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CGFT_ObjectFile))
+#endif
         throw std::runtime_error("LLVM cannot emit object file for this target");
 
     pm.run(*llvmMod_);
@@ -141,6 +149,7 @@ void CodeGen::registerBuiltins() {
     typeTable_["BYTE"]     = make(TypeKind::Byte,     "BYTE");
     typeTable_["SET"]      = make(TypeKind::Set,      "SET");
     typeTable_["STRING"]   = make(TypeKind::String,   "STRING");
+    typeTable_["LONGREAL"] = typeTable_["REAL"];  // Project Oberon compat alias
 }
 
 OberonTypePtr CodeGen::resolveTypeName(const std::string& mod,
@@ -194,6 +203,13 @@ OberonTypePtr CodeGen::resolveType(const TypeExpr& te) {
         for (auto& fl : r->fields)
             for (auto& fn : fl.names)
                 t->fields.push_back({fn, resolveType(*fl.type)});
+        // Prepend inherited fields from the base record so that fieldIndex()
+        // and LLVM struct indices match for both own and inherited fields.
+        if (!r->baseIdent.empty()) {
+            OberonTypePtr base = resolveTypeName(r->baseModule, r->baseIdent);
+            if (base && base->kind == TypeKind::Record && !base->fields.empty())
+                t->fields.insert(t->fields.begin(), base->fields.begin(), base->fields.end());
+        }
         return t;
     }
 

@@ -125,3 +125,9 @@ qemu-system-aarch64 -M virt -cpu cortex-a57 \
 2. Assemble to object: `llc-14 --march=x86-64 --filetype=obj MyMod.ll -o MyMod.o` (or `llc --march=aarch64` for AArch64)
 3. Link: replace `hello_x86.o` with `MyMod.o` in the `ld` invocation (or extend `CMakeLists.txt`)
 4. Boot with QEMU as above.
+
+ ## Build Quality
+    - Always build with warnings-as-errors where feasible: `-Wall -Wextra -Wpedantic`
+    - Fix all compiler warnings before considering a change complete
+    - For LLVM-dependent code, suppress only warnings that are unavoidable due to LLVM API design (document why with a comment)
+
