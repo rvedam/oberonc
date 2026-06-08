@@ -718,6 +718,7 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
     }
 
     // Indirect call through a procedure variable or record field
+    // (excludes direct procedure references registered with a Function llvmVal)
     {
         bool isFieldCall = !d.module.empty() && !importedModules_.contains(d.module);
         Symbol* procSym  = nullptr;
@@ -725,7 +726,8 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
             procSym = lookupSym(d.ident);
 
         if (isFieldCall ||
-            (procSym && procSym->type && procSym->type->kind == TypeKind::Procedure)) {
+            (procSym && procSym->type && procSym->type->kind == TypeKind::Procedure &&
+             !llvm::isa<llvm::Function>(procSym->llvmVal))) {
             auto [addr, procTy] = isFieldCall ? genAddr(d)
                                               : AddrResult{procSym->llvmVal, procSym->type};
             if (!procTy || procTy->kind != TypeKind::Procedure)
@@ -946,6 +948,8 @@ void CodeGen::genCall(const ProcCallStmt& s) {
     //       parsed as qualident{module="F", ident="handle"} where F is a variable.
     //   (b) d.module is empty but d.ident is a local symbol of Procedure type —
     //       e.g., a bare procedure-variable call p(…).
+    // Note: symbols registered for direct procedures (llvmVal is a Function, not
+    // an alloca/global) are excluded — those take the direct-call path below.
     {
         bool isFieldCall = !d.module.empty() && !importedModules_.contains(d.module);
         Symbol* procSym  = nullptr;
@@ -953,7 +957,8 @@ void CodeGen::genCall(const ProcCallStmt& s) {
             procSym = lookupSym(d.ident);
 
         if (isFieldCall ||
-            (procSym && procSym->type && procSym->type->kind == TypeKind::Procedure)) {
+            (procSym && procSym->type && procSym->type->kind == TypeKind::Procedure &&
+             !llvm::isa<llvm::Function>(procSym->llvmVal))) {
             auto [addr, procTy] = isFieldCall ? genAddr(d)
                                               : AddrResult{procSym->llvmVal, procSym->type};
             if (!procTy || procTy->kind != TypeKind::Procedure)
@@ -1064,15 +1069,74 @@ void CodeGen::genIf(const IfStmt& s) {
 
 // CASE expression OF case {"|" case} END
 void CodeGen::genCase(const CaseStmt& s) {
-    auto* expr    = genExpr(*s.expr);
-    auto* endBB   = llvm::BasicBlock::Create(ctx_, "case.end", curFunc_);
+    auto* endBB = llvm::BasicBlock::Create(ctx_, "case.end", curFunc_);
 
-    auto* curCheckBB = b_->GetInsertBlock(); // we'll chain condition checks
-    (void)curCheckBB;
+    // Detect type-guard CASE: labels are type names (record/pointer types),
+    // not integer values. Oberon uses this for message-type dispatch.
+    auto isTypeLabel = [&](const Expr& e) -> bool {
+        auto* de = dynamic_cast<const DesignatorExpr*>(&e);
+        if (!de || de->args || !de->desig->selectors.empty()) return false;
+        std::string key = de->desig->module.empty()
+            ? de->desig->ident
+            : de->desig->module + "_" + de->desig->ident;
+        return typeTable_.count(key) > 0 ||
+               (!de->desig->module.empty() && typeTable_.count(de->desig->ident) > 0);
+    };
 
+    bool typeGuard = !s.arms.empty() &&
+                     !s.arms[0].labels.empty() &&
+                     isTypeLabel(*s.arms[0].labels[0].lo);
+
+    if (typeGuard) {
+        // Determine the variable being dispatched on (for type narrowing).
+        std::string varName;
+        if (auto* de = dynamic_cast<const DesignatorExpr*>(s.expr.get())) {
+            if (!de->args && de->desig->selectors.empty())
+                varName = de->desig->ident;
+        }
+
+        // Emit each arm with the CASE variable temporarily narrowed to the
+        // arm's guard type. This is a stub — proper dispatch requires runtime
+        // type tags, but this allows all modules to compile and link.
+        for (auto& arm : s.arms) {
+            if (arm.labels.empty()) continue;
+
+            // Resolve guard type from label (first label per arm is the type name)
+            OberonTypePtr guardType;
+            if (!varName.empty()) {
+                if (auto* lde = dynamic_cast<const DesignatorExpr*>(
+                        arm.labels[0].lo.get())) {
+                    std::string key = lde->desig->module.empty()
+                        ? lde->desig->ident
+                        : lde->desig->module + "_" + lde->desig->ident;
+                    auto it = typeTable_.find(key);
+                    if (it == typeTable_.end())
+                        it = typeTable_.find(lde->desig->ident);
+                    if (it != typeTable_.end()) guardType = it->second;
+                }
+            }
+
+            // Temporarily narrow the dispatched variable's type for field access
+            Symbol* sym = varName.empty() ? nullptr : lookupSym(varName);
+            Symbol  saved;
+            if (sym && guardType) { saved = *sym; sym->type = guardType; }
+
+            genStmts(arm.body);
+
+            if (sym && guardType) *sym = saved; // restore original type
+
+            if (!blockTerminated()) break; // stub: stop after first emitted arm
+        }
+        if (!blockTerminated()) b_->CreateBr(endBB);
+        b_->SetInsertPoint(endBB);
+        return;
+    }
+
+    // Integer/CHAR CASE: standard switch via chained comparisons
+    auto* expr = genExpr(*s.expr);
     for (size_t armIdx = 0; armIdx < s.arms.size(); ++armIdx) {
         auto& arm = s.arms[armIdx];
-        if (arm.labels.empty()) continue; // empty arm
+        if (arm.labels.empty()) continue;
 
         auto* armBB  = llvm::BasicBlock::Create(ctx_, "case.arm", curFunc_);
         auto* nextBB = llvm::BasicBlock::Create(ctx_, "case.chk", curFunc_);

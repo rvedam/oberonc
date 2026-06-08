@@ -298,7 +298,12 @@ llvm::Type* CodeGen::toLLVM(OberonTypePtr t) {
         std::vector<llvm::Type*> pts;
         for (auto& p : t->params) {
             llvm::Type* pt = toLLVM(p.type);
-            if (p.isVar) pt = llvm::PointerType::get(pt, 0);
+            // Aggregates (arrays, records) must be passed as pointers in LLVM IR
+            if (p.type && (p.type->kind == TypeKind::Array ||
+                           p.type->kind == TypeKind::Record))
+                pt = llvm::PointerType::get(pt, 0);
+            else if (p.isVar)
+                pt = llvm::PointerType::get(pt, 0);
             pts.push_back(pt);
         }
         auto* rty = t->retType ? toLLVM(t->retType) : llvm::Type::getVoidTy(ctx_);
@@ -315,7 +320,12 @@ llvm::FunctionType* CodeGen::toLLVMFunctionType(OberonTypePtr t) {
     std::vector<llvm::Type*> pts;
     for (auto& p : t->params) {
         llvm::Type* pt = toLLVM(p.type);
-        if (p.isVar) pt = llvm::PointerType::get(pt, 0);
+        // Aggregates (arrays, records) must be passed as pointers in LLVM IR
+        if (p.type && (p.type->kind == TypeKind::Array ||
+                       p.type->kind == TypeKind::Record))
+            pt = llvm::PointerType::get(pt, 0);
+        else if (p.isVar)
+            pt = llvm::PointerType::get(pt, 0);
         pts.push_back(pt);
     }
     auto* rty = t->retType ? toLLVM(t->retType) : llvm::Type::getVoidTy(ctx_);
@@ -839,8 +849,20 @@ void CodeGen::declareProcs(const std::vector<std::shared_ptr<ProcDecl>>& procs) 
                                             pd->params->retIdent));
 
         auto* ft = llvm::FunctionType::get(retTy, paramTys, false);
-        llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
-                                fname, llvmMod_.get());
+        auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                           fname, llvmMod_.get());
+
+        // Register in symbol table so the procedure can be used as a first-class
+        // value (e.g. assigned to a procedure variable: p.handler := MyProc).
+        if (!lookupSym(pd->name)) {
+            auto procTy = std::make_shared<OberonType>();
+            procTy->kind = TypeKind::Procedure;
+            Symbol sym;
+            sym.type    = procTy;
+            sym.llvmVal = fn;
+            sym.isConst = true;
+            addSym(pd->name, std::move(sym));
+        }
     }
 }
 
@@ -1089,7 +1111,12 @@ int64_t CodeGen::evalConstInt(const Expr& e) {
 
     if (auto* de = dynamic_cast<const DesignatorExpr*>(&e)) {
         if (!de->args && de->desig->selectors.empty()) {
-            auto* sym = lookupSym(de->desig->ident);
+            // Try module-qualified key first (e.g. "FileDir_ExTabSize")
+            Symbol* sym = nullptr;
+            if (!de->desig->module.empty())
+                sym = lookupSym(de->desig->module + "_" + de->desig->ident);
+            if (!sym)
+                sym = lookupSym(de->desig->ident);
             if (sym && sym->isConst && sym->llvmVal) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(sym->llvmVal))
                     return static_cast<int64_t>(ci->getSExtValue());

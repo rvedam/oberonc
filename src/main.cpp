@@ -70,11 +70,12 @@ static std::string compileToObject(const std::string& modSrcPath) {
 
 static void usage() {
     std::cerr <<
-        "usage: oberonc [--emit-llvm] [--init-only] [-o output] <file.Mod>\n"
-        "  --emit-llvm   emit LLVM IR (.ll) instead of linking an executable\n"
-        "  --init-only   emit ModuleName_init() instead of oberon_main()\n"
-        "                (use when compiling library/dependency modules)\n"
-        "  -o output     output file path (executable, or .ll with --emit-llvm)\n";
+        "usage: oberonc [--emit-llvm] [--init-only] [--module-path <dir>] [-o output] <file.Mod>\n"
+        "  --emit-llvm        emit LLVM IR (.ll) instead of linking an executable\n"
+        "  --init-only        emit ModuleName_init() instead of oberon_main()\n"
+        "                     (use when compiling library/dependency modules)\n"
+        "  --module-path dir  add a directory to the module search path (repeatable)\n"
+        "  -o output          output file path (executable, or .ll with --emit-llvm)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -82,6 +83,7 @@ int main(int argc, char* argv[]) {
     bool initOnly   = false;
     std::string outputArg;
     std::string srcPath;
+    std::vector<std::string> extraModulePaths;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view a = argv[i];
@@ -89,6 +91,9 @@ int main(int argc, char* argv[]) {
             emitLLVM = true;
         } else if (a == "--init-only") {
             initOnly = true;
+        } else if (a == "--module-path") {
+            if (++i >= argc) { usage(); return 1; }
+            extraModulePaths.push_back(argv[i]);
         } else if (a == "-o") {
             if (++i >= argc) { usage(); return 1; }
             outputArg = argv[i];
@@ -113,10 +118,12 @@ int main(int argc, char* argv[]) {
         Module mod = parser.parseModule();
 
         CodeGen cg(mod.name);
-        // Pass the source file's directory so imports can be resolved
+        // Source file's directory is always searched first; --module-path dirs follow
         std::string srcDir = std::filesystem::path(srcPath).parent_path().string();
         if (srcDir.empty()) srcDir = ".";
-        cg.setModulePaths(std::array<std::string, 1>{srcDir});
+        std::vector<std::string> modulePaths = {srcDir};
+        modulePaths.insert(modulePaths.end(), extraModulePaths.begin(), extraModulePaths.end());
+        cg.setModulePaths(modulePaths);
         if (initOnly) cg.setModuleInitOnly(true);
         cg.generate(mod);
 
