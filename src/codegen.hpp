@@ -58,6 +58,10 @@ private:
     std::set<std::string>                   importedModules_;
     std::unordered_map<std::string, OberonTypePtr>    typeTable_;
     std::unordered_map<OberonType*, llvm::Type*>      llvmTypeCache_;
+    // Keeps every OberonType we've cached alive so llvmTypeCache_ keys stay valid.
+    // Without this, short-lived types (proc-local vars, params) can be freed and
+    // their address reused, causing stale cache hits with the wrong LLVM type.
+    std::vector<OberonTypePtr>                         liveTypes_;
 
     // ---- Module search paths (for resolving imports) ----
     std::vector<std::string>                modulePaths_;

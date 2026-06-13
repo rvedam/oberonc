@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Configure (first time or after CMakeLists.txt changes)
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
+# On Apple Silicon use apple-aarch64; on Linux x86-64 use x86_64
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DKERNEL_ARCH=apple-aarch64
 
 # Build everything (compiler + tests)
 cmake --build build -j$(nproc)

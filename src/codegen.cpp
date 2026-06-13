@@ -255,6 +255,10 @@ llvm::Type* CodeGen::toLLVM(OberonTypePtr t) {
     auto it = llvmTypeCache_.find(t.get());
     if (it != llvmTypeCache_.end()) return it->second;
 
+    // Keep this type alive for the lifetime of CodeGen so the cache key (raw
+    // pointer) stays valid even after the caller's shared_ptr goes out of scope.
+    liveTypes_.push_back(t);
+
     llvm::Type* result = nullptr;
     switch (t->kind) {
     case TypeKind::Integer:
