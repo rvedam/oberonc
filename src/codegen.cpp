@@ -507,6 +507,21 @@ void CodeGen::loadModuleInterface(const std::string& alias,
         return; // parse failure → skip
     }
 
+    // Recursively load this module's own imports before processing its types.
+    // This ensures transitively-needed types (e.g. Files.Rider used in Texts'
+    // Reader record) are in typeTable_ when resolveType runs below.
+    for (auto& imp : importedMod.imports) {
+        if (imp.name == "SYSTEM" || imp.name == "Out" || imp.name == "In") continue;
+        // Skip if already loaded (prevents infinite recursion and duplicate work).
+        bool already = false;
+        for (auto& [a, m] : loadedUserModules_)
+            if (m == imp.name) { already = true; break; }
+        if (!already)
+            loadModuleInterface(imp.name, imp.name);
+        // Don't add to importedModules_: the current (top-level) module didn't
+        // explicitly import this transitive dependency.
+    }
+
     // Import exported constants as compile-time values in the symbol table.
     auto* i64c = llvm::Type::getInt64Ty(ctx_);
     std::vector<std::string> importTempConstKeys;
