@@ -8,7 +8,7 @@ We want to compile all 14 non-demo Project Oberon modules into a bootable apple-
 
 ---
 
-## Current Status (2026-06-13, commit 28bb516)
+## Current Status (2026-06-13, post Bug-2a fix — 11/14 pass)
 
 ### Trial run command
 ```bash
@@ -20,7 +20,7 @@ mkdir -p /tmp/po_trial && for mod in Kernel Display Input FileDir Files Modules 
 done
 ```
 
-### Build order & blocker map (10 pass, 4 fail)
+### Build order & blocker map (11 pass, 3 fail)
 
 | # | Module | Status | Error |
 |---|---|---|---|
@@ -34,7 +34,7 @@ done
 | 8 | Viewers | ✅ | — |
 | 9 | Texts | ✅ | — |
 | 10 | Oberon | ✅ | — |
-| 11 | **MenuViewers** | ❌ | `unknown symbol: Viewer` (Bug 2a) |
+| 11 | MenuViewers | ✅ | — |
 | 12 | **TextFrames** | ❌ | `unknown imported proc: Oberon_FocusViewer` (Bug 2b) |
 | 13 | **Edit** | ❌ | `field sel on non-record` (Bug 3) |
 | 14 | **System** | ❌ | `field sel on non-record` (Bug 3) |
@@ -55,7 +55,9 @@ done
 | Open array length convention | earlier | Hidden `i64` arg, `__len_<name>` binding, `LEN` runtime load |
 | Char literals emit `i8` not `ptr` | bfc5442 | Single-char and hex-char string literals → `ConstantInt::get(i8, v)` |
 | **Stale `llvmTypeCache_` fix** | **28bb516** | **See Bug 1 below** |
-| **Recursive transitive import loading** | **current** | **See Bug 2 below** |
+| **Recursive transitive import loading** | **3f228f0** | **See Bug 2 below** |
+| **IS operator short-circuit in genExpr** | **current** | Bug 2a: skip RHS eval for `X IS T`; return true |
+| **isFieldCall broadened to selector chains** | **current** | proc-var call through imported module var's field works |
 
 ---
 
@@ -89,15 +91,17 @@ done
 
 ---
 
-### Bug 2a — `unknown symbol: Viewer` (MenuViewers)
+### Bug 2a — `unknown symbol: Viewer` (MenuViewers) — ✅ FIXED
 
 **Symptom:** `error: codegen: unknown symbol: Viewer` when compiling MenuViewers.
 
-**Context:** MenuViewers defines its own `TYPE Viewer* = POINTER TO ViewerDesc` and imports `Viewers`. In a type-guard CASE statement (line ~121–133), arms use both `Viewer` (the local type) and `Viewers.Viewer` (the imported one). The unqualified `Viewer` arm fails with "unknown symbol".
+**Root cause:** In `genExpr`, the `BinaryOp::Is` case was handled by the general switch which first evaluated both operands. The RHS of `V1 IS Viewer` is a type name (DesignatorExpr for `Viewer`), not a variable — so `genAddr` failed with "unknown symbol: Viewer".
 
-**Likely root cause:** The type-guard CASE detection calls `genExpr` or `lookupSym` on the arm label, which resolves `Viewer` as a symbol lookup rather than a type lookup. Now that transitive imports are loaded, a `Viewer` symbol from a transitive dep may shadow or conflict with the local type name. Or, the CASE arm handler calls `genAddr`/`genExpr` on the label which hits the "unknown symbol" path in `genAddr`.
+**Fix:** Added an early-out before operand evaluation in `genBinExpr`: if `be->op == BinaryOp::Is`, evaluate only the left side (for side effects) and return `ConstantInt::getTrue` immediately. The RHS type name is never passed to `genExpr`.
 
-**Unblocks:** MenuViewers.
+**Files changed:** `src/codegen_gen.cpp` (IS guard in the BinaryExpr handler)
+
+**Unblocks:** MenuViewers ✅
 
 ---
 

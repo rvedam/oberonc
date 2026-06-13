@@ -228,6 +228,13 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
 
     // ---- Binary ----
     if (auto* be = dynamic_cast<const BinaryExpr*>(&e)) {
+        // IS must be handled before evaluating operands: the RHS is a type name,
+        // not a value, so genExpr on it would fail with "unknown symbol".
+        if (be->op == BinaryOp::Is) {
+            genExpr(*be->left); // evaluate for side effects
+            return llvm::ConstantInt::getTrue(ctx_);
+        }
+
         auto* lhs = genExpr(*be->left);
         auto* rhs = genExpr(*be->right);
         bool fp = lhs->getType()->isDoubleTy() || rhs->getType()->isDoubleTy();
@@ -743,7 +750,10 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
     // Indirect call through a procedure variable or record field
     // (excludes direct procedure references registered with a Function llvmVal)
     {
-        bool isFieldCall = !d.module.empty() && !importedModules_.contains(d.module);
+        // Also treat as a field call when an imported module's variable is
+        // accessed through selectors (e.g. Oberon.FocusViewer.handle(...)).
+        bool isFieldCall = !d.module.empty() &&
+                           (!importedModules_.contains(d.module) || !d.selectors.empty());
         Symbol* procSym  = nullptr;
         if (!isFieldCall && d.module.empty())
             procSym = lookupSym(d.ident);
