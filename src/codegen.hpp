@@ -81,6 +81,11 @@ private:
     // ---- External / imported functions ----
     std::unordered_map<std::string, llvm::Function*> extFuncs_;
 
+    // ---- Open-array formal tracking ----
+    // Maps each LLVM function to a bool vector: true at index i means formal i
+    // is an open array and has a hidden i64 length argument following it.
+    std::unordered_map<llvm::Function*, std::vector<bool>> openArrayFormals_;
+
     // ---- Per-function state ----
     llvm::Function*   curFunc_    = nullptr;
     llvm::BasicBlock* exitBlock_  = nullptr; // unified function exit

@@ -160,6 +160,10 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
             unsigned char cv = content.empty() ? '\0' : static_cast<unsigned char>(content[0]);
             return llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), cv);
         }
+        // Single-char string literal is compatible with CHAR (Oberon §8.1)
+        if (content.size() == 1)
+            return llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_),
+                                          static_cast<unsigned char>(content[0]));
         auto* gv = getOrCreateStrLit(content);
         return strLitPtr(gv);
     }
@@ -397,9 +401,14 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
 // -----------------------------------------------------------------------
 OberonTypePtr CodeGen::tryGetTypeArg(const Expr& e) {
     auto* de = dynamic_cast<const DesignatorExpr*>(&e);
-    if (!de || de->args.has_value() || !de->desig->selectors.empty()
-            || !de->desig->module.empty())
+    if (!de || de->args.has_value() || !de->desig->selectors.empty())
         return nullptr;
+    // Try qualified key first (e.g. "FileDir_FileHd" for FileDir.FileHd).
+    if (!de->desig->module.empty()) {
+        auto it = typeTable_.find(de->desig->module + "_" + de->desig->ident);
+        if (it != typeTable_.end()) return it->second;
+        return nullptr;
+    }
     auto it = typeTable_.find(de->desig->ident);
     return (it != typeTable_.end()) ? it->second : nullptr;
 }
@@ -498,6 +507,10 @@ llvm::Value* CodeGen::genSysCallVal(const DesignatorExpr& de) {
             return b_->CreateIntToPtr(src, tgt, "val");
         if (src->getType()->isPointerTy() && tgt->isIntegerTy())
             return b_->CreatePtrToInt(src, tgt, "val");
+        // Aggregate target (struct/array): ptr already points to the right memory.
+        // Return it as-is; caller will pass it as a pointer argument.
+        if (src->getType()->isPointerTy() && (tgt->isStructTy() || tgt->isArrayTy()))
+            return src;
         return b_->CreateBitCast(src, tgt, "val");
     }
 
@@ -636,22 +649,32 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
             return b_->CreateICmpNE(bit, llvm::ConstantInt::get(i64, 0));
         }
 
-        // LEN(a) — compile-time array length
+        // LEN(a) — array length (compile-time for fixed arrays, runtime for open arrays)
         if (d.ident == "LEN" && !args.empty()) {
             if (auto* de0 = dynamic_cast<const DesignatorExpr*>(args[0].get())) {
                 if (!de0->args) {
                     auto [addr, ty] = genAddr(*de0->desig);
                     (void)addr;
-                    if (ty && ty->kind == TypeKind::Array && !ty->isOpen)
-                        return llvm::ConstantInt::get(i64, ty->length);
+                    if (ty && ty->kind == TypeKind::Array) {
+                        if (!ty->isOpen)
+                            return llvm::ConstantInt::get(i64, ty->length);
+                        // Open array: load the hidden length argument.
+                        Symbol* lenSym = lookupSym("__len_" + de0->desig->ident);
+                        if (lenSym)
+                            return b_->CreateLoad(i64, lenSym->llvmVal, "len");
+                    }
                 }
             }
-            error("LEN: argument must be a fixed-length array variable");
+            error("LEN: argument must be an array variable");
         }
 
-        // ORD(c) — ordinal of CHAR or BOOLEAN
-        if (d.ident == "ORD" && args.size() == 1)
-            return coerce(genExpr(*args[0]), i64);
+        // ORD(c) — ordinal of CHAR, BOOLEAN, SET, or REAL (bit reinterpretation)
+        if (d.ident == "ORD" && args.size() == 1) {
+            auto* v = genExpr(*args[0]);
+            if (v->getType()->isDoubleTy())
+                return b_->CreateBitCast(v, i64, "ord");
+            return coerce(v, i64);
+        }
 
         // CHR(x) — CHAR from integer
         if (d.ident == "CHR" && args.size() == 1)
@@ -772,30 +795,63 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
         if (!fn) error("unknown procedure: " + d.ident);
     }
 
-    // Build arguments
+    // Build arguments (mirrors genCall's open-array logic)
     std::vector<llvm::Value*> args;
     auto& fty = *fn->getFunctionType();
+    auto openIt2 = openArrayFormals_.find(fn);
+    const std::vector<bool>* openFlags2 =
+        openIt2 != openArrayFormals_.end() ? &openIt2->second : nullptr;
+    size_t llvmParamIdx2 = 0;
     if (de.args) {
         for (size_t i = 0; i < de.args->size(); ++i) {
             auto& argExpr = *(*de.args)[i];
             llvm::Value* v = nullptr;
-            llvm::Type*  expectedTy = (i < fty.getNumParams())
-                                      ? fty.getParamType(i) : nullptr;
+            OberonTypePtr argOT2;
+            llvm::Type* expectedTy = (llvmParamIdx2 < fty.getNumParams())
+                                     ? fty.getParamType(llvmParamIdx2) : nullptr;
 
             // For pointer-type parameters (VAR or array), pass address
             if (expectedTy && expectedTy->isPointerTy()) {
                 if (auto* dse = dynamic_cast<const DesignatorExpr*>(&argExpr)) {
                     if (!dse->args) {
-                        auto [addr, _] = genAddr(*dse->desig);
+                        auto [addr, aty] = genAddr(*dse->desig);
                         v = coerce(addr, expectedTy);
+                        argOT2 = aty;
                     }
                 }
             }
             if (!v) {
                 v = genExpr(argExpr);
                 if (expectedTy) v = coerce(v, expectedTy);
+                if (expectedTy && expectedTy->isPointerTy() &&
+                    v && !v->getType()->isPointerTy()) {
+                    auto* tmp = createEntryAlloca(curFunc_, v->getType(), "var_tmp");
+                    b_->CreateStore(v, tmp);
+                    v = tmp;
+                }
             }
             args.push_back(v);
+            ++llvmParamIdx2;
+
+            // Open array formal: also emit the hidden i64 length argument.
+            bool formalIsOpen2 = openFlags2 && i < openFlags2->size() && (*openFlags2)[i];
+            if (formalIsOpen2) {
+                auto* i64ty = llvm::Type::getInt64Ty(ctx_);
+                llvm::Value* lenVal = nullptr;
+                if (argOT2 && argOT2->kind == TypeKind::Array) {
+                    if (argOT2->isOpen) {
+                        if (auto* dse = dynamic_cast<const DesignatorExpr*>(&argExpr)) {
+                            Symbol* lenSym = lookupSym("__len_" + dse->desig->ident);
+                            if (lenSym) lenVal = b_->CreateLoad(i64ty, lenSym->llvmVal);
+                        }
+                    } else {
+                        lenVal = llvm::ConstantInt::get(i64ty, argOT2->length);
+                    }
+                }
+                if (!lenVal) lenVal = llvm::ConstantInt::get(i64ty, 0);
+                args.push_back(lenVal);
+                ++llvmParamIdx2;
+            }
         }
     }
 
@@ -1004,25 +1060,64 @@ void CodeGen::genCall(const ProcCallStmt& s) {
 
     std::vector<llvm::Value*> args;
     auto& fty = *fn->getFunctionType();
+    // Look up which formals are open arrays (have a hidden i64 length arg following them).
+    auto openIt = openArrayFormals_.find(fn);
+    const std::vector<bool>* openFlags =
+        openIt != openArrayFormals_.end() ? &openIt->second : nullptr;
+
+    size_t llvmParamIdx = 0; // tracks position in LLVM param list (may skip past hidden lengths)
     if (s.args) {
         for (size_t i = 0; i < s.args->size(); ++i) {
             auto& argExpr = *(*s.args)[i];
-            llvm::Type* expectedTy = (i < fty.getNumParams())
-                                     ? fty.getParamType(i) : nullptr;
+            llvm::Type* expectedTy = (llvmParamIdx < fty.getNumParams())
+                                     ? fty.getParamType(llvmParamIdx) : nullptr;
             llvm::Value* v = nullptr;
+            OberonTypePtr argOT; // actual argument's Oberon type (for open array length)
             if (expectedTy && expectedTy->isPointerTy()) {
                 if (auto* dse = dynamic_cast<const DesignatorExpr*>(&argExpr)) {
                     if (!dse->args) {
-                        auto [addr, _] = genAddr(*dse->desig);
+                        auto [addr, aty] = genAddr(*dse->desig);
                         v = coerce(addr, expectedTy);
+                        argOT = aty;
                     }
                 }
             }
             if (!v) {
                 v = genExpr(argExpr);
                 if (expectedTy) v = coerce(v, expectedTy);
+                // VAR param (expected ptr) but got a non-ptr rvalue (e.g. SYSTEM.VAL
+                // result): spill to a temp alloca so we can pass an address.
+                if (expectedTy && expectedTy->isPointerTy() &&
+                    v && !v->getType()->isPointerTy()) {
+                    auto* tmp = createEntryAlloca(curFunc_, v->getType(), "var_tmp");
+                    b_->CreateStore(v, tmp);
+                    v = tmp;
+                }
             }
             args.push_back(v);
+            ++llvmParamIdx;
+
+            // If this formal is an open array, also pass the hidden length argument.
+            bool formalIsOpen = openFlags && i < openFlags->size() && (*openFlags)[i];
+            if (formalIsOpen) {
+                auto* i64ty = llvm::Type::getInt64Ty(ctx_);
+                llvm::Value* lenVal = nullptr;
+                if (argOT && argOT->kind == TypeKind::Array) {
+                    if (argOT->isOpen) {
+                        // Forwarding an open array parameter — load its hidden length.
+                        if (auto* dse = dynamic_cast<const DesignatorExpr*>(&argExpr)) {
+                            Symbol* lenSym = lookupSym("__len_" + dse->desig->ident);
+                            if (lenSym) lenVal = b_->CreateLoad(i64ty, lenSym->llvmVal);
+                        }
+                    } else {
+                        // Fixed-length array: length is compile-time constant.
+                        lenVal = llvm::ConstantInt::get(i64ty, argOT->length);
+                    }
+                }
+                if (!lenVal) lenVal = llvm::ConstantInt::get(i64ty, 0);
+                args.push_back(lenVal);
+                ++llvmParamIdx;
+            }
         }
     }
     b_->CreateCall(fn, args);

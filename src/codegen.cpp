@@ -505,6 +505,7 @@ void CodeGen::loadModuleInterface(const std::string& alias,
 
     // Import exported constants as compile-time values in the symbol table.
     auto* i64c = llvm::Type::getInt64Ty(ctx_);
+    std::vector<std::string> importTempConstKeys;
     for (auto& cd : importedMod.decls.consts) {
         if (!cd.exported) continue;
         std::string symKey = alias + "_" + cd.name;
@@ -515,11 +516,143 @@ void CodeGen::loadModuleInterface(const std::string& alias,
             sym.isConst = true;
             sym.type    = typeTable_["INTEGER"];
             sym.llvmVal = llvm::ConstantInt::get(i64c, val);
-            addSym(symKey, std::move(sym));
+            addSym(symKey, sym); // copy; we also register the short name below
+            // Register under the short name so that Pass 2 resolveType/evalConstInt
+            // can resolve unqualified references (e.g. "FnLength" in the expression
+            // "ARRAY FnLength OF CHAR" appearing inside the imported module's source).
+            if (!lookupSym(cd.name)) {
+                addSym(cd.name, std::move(sym));
+                importTempConstKeys.push_back(cd.name);
+            }
         } catch (...) { /* skip non-integer-foldable constants */ }
     }
 
-    // Declare each exported procedure as an external LLVM function
+    // -----------------------------------------------------------------------
+    // Import exported TYPE declarations (must happen before procedure
+    // declarations so resolveType can resolve parameter types).
+    //
+    // Two-pass approach (mirrors registerTypeDecls / fillTypeDecls):
+    //
+    // Pass 1 — create stubs for every exported type, registered under both
+    //   the alias-qualified key ("alias_TypeName", permanent) and a short key
+    //   ("TypeName", temporary).  The short key lets resolveType resolve
+    //   intra-module references (e.g. PointPtr → Point) during Pass 2.
+    //
+    // Pass 2 — call resolveType to fill in field lists, base types, etc.
+    //   Short-key entries are removed afterwards to avoid polluting the
+    //   current module's namespace (but are kept alive through variable and
+    //   procedure declarations below).
+    // -----------------------------------------------------------------------
+
+    std::vector<std::string> importTempKeys; // short names removed after import
+
+    // Adds ot under "alias_short" (permanent) and "short" (temporary).
+    auto addStub = [&](const std::string& shortName, OberonTypePtr ot) {
+        std::string qualKey = alias + "_" + shortName;
+        if (!typeTable_.contains(qualKey))
+            typeTable_[qualKey] = ot;
+        if (!typeTable_.contains(shortName)) {
+            typeTable_[shortName] = ot;
+            importTempKeys.push_back(shortName);
+        }
+    };
+
+    // Pass 1: register minimal stubs so forward references resolve in Pass 2.
+    // Non-exported types are also processed so that exported types that reference
+    // them (e.g. SectorTable uses non-exported DiskAdr) can be resolved in Pass 2.
+    for (auto& td : importedMod.decls.types) {
+        std::string qualKey = alias + "_" + td.name;
+        if (td.exported && typeTable_.contains(qualKey)) continue;
+
+        OberonTypePtr stub = std::make_shared<OberonType>();
+        stub->name = td.name;
+
+        if (dynamic_cast<const RecordTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Record;
+            if (td.exported) {
+                // Named LLVM struct only for exported types (imported by name).
+                if (!llvm::StructType::getTypeByName(ctx_, qualKey))
+                    llvm::StructType::create(ctx_, qualKey);
+                llvmTypeCache_[stub.get()] =
+                    llvm::StructType::getTypeByName(ctx_, qualKey);
+            }
+        } else if (auto* p = dynamic_cast<const PointerTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Pointer;
+            if (auto* q = dynamic_cast<const QualIdentType*>(p->base.get()))
+                stub->ptrBaseName = q->ident;
+        } else if (dynamic_cast<const ProcedureTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Procedure;
+        } else if (dynamic_cast<const ArrayTypeExpr*>(td.type.get())) {
+            stub->kind = TypeKind::Array;
+        } else if (auto* q = dynamic_cast<const QualIdentType*>(td.type.get())) {
+            // Type alias (e.g. "DiskAdr = INTEGER"): resolve to target if available.
+            auto it = typeTable_.find(q->ident);
+            if (it == typeTable_.end()) continue;
+            stub = it->second;
+        } else {
+            continue; // unsupported — skip
+        }
+
+        if (td.exported) {
+            addStub(td.name, stub); // permanent alias_Name + temporary short name
+        } else if (!typeTable_.contains(td.name)) {
+            typeTable_[td.name] = stub; // temporary short name only
+            importTempKeys.push_back(td.name);
+        }
+    }
+
+    // Pass 2: fill in type bodies now that all stubs are visible by short name.
+    for (auto& td : importedMod.decls.types) {
+        if (!td.exported) continue;
+        std::string qualKey = alias + "_" + td.name;
+        auto existIt = typeTable_.find(qualKey);
+        if (existIt == typeTable_.end()) continue;
+        OberonTypePtr& stub = existIt->second;
+
+        try {
+            OberonTypePtr filled = resolveType(*td.type);
+            filled->name = td.name;
+
+            if (stub->kind == TypeKind::Record) {
+                // Fill the LLVM named-struct body (was opaque after Pass 1).
+                auto* st = llvm::dyn_cast_or_null<llvm::StructType>(
+                    llvm::StructType::getTypeByName(ctx_, qualKey));
+                if (st && st->isOpaque()) {
+                    std::vector<llvm::Type*> elts;
+                    for (auto& [fn, ft] : filled->fields)
+                        elts.push_back(toLLVM(ft));
+                    if (!elts.empty()) st->setBody(elts);
+                }
+                // Update the stub in-place (other types may already hold a
+                // shared_ptr to it, so we must not replace the object).
+                stub->fields     = std::move(filled->fields);
+                stub->baseName   = std::move(filled->baseName);
+                stub->baseModule = std::move(filled->baseModule);
+            } else if (stub->kind == TypeKind::Pointer) {
+                stub->ptrBase     = filled->ptrBase;
+                stub->ptrBaseName = filled->ptrBaseName;
+                if (stub->ptrBase)
+                    llvmTypeCache_[stub.get()] =
+                        llvm::PointerType::get(toLLVM(stub->ptrBase), 0);
+            } else if (stub->kind == TypeKind::Procedure) {
+                stub->params  = std::move(filled->params);
+                stub->retType = std::move(filled->retType);
+            } else if (stub->kind == TypeKind::Array) {
+                stub->isOpen = filled->isOpen;
+                stub->length = filled->length;
+                stub->elem   = std::move(filled->elem);
+            }
+        } catch (...) {
+            // Dependency unavailable (e.g. type from a transitively imported
+            // module that wasn't loaded).  Leave the stub as-is; callers that
+            // actually use this type will get a more specific error.
+        }
+    }
+
+    // Declare each exported procedure as an external LLVM function.
+    // Types are now resolved, so we can use resolveType for parameter types
+    // and apply the same conventions as declareProcs (array-as-pointer,
+    // open-array hidden length, openArrayFormals_ registration).
     for (auto& pd : importedMod.decls.procs) {
         if (!pd->exported) continue;
 
@@ -527,32 +660,32 @@ void CodeGen::loadModuleInterface(const std::string& alias,
         if (llvmMod_->getFunction(fname)) continue; // already declared
 
         std::vector<llvm::Type*> paramTys;
+        std::vector<bool> openFlags;
         if (pd->params) {
             for (auto& sec : pd->params->sections) {
-                // Map Oberon types to LLVM types using the type name
-                llvm::Type* lt = nullptr;
-                if (auto* q = dynamic_cast<const QualIdentType*>(sec.formalType.get())) {
-                    auto it = typeTable_.find(q->ident);
-                    if (it != typeTable_.end())
-                        lt = toLLVM(it->second);
-                }
-                if (!lt) lt = llvm::Type::getInt64Ty(ctx_); // default to i64
-                if (sec.isVar) lt = llvm::PointerType::get(lt, 0);
-                for (size_t i = 0; i < sec.names.size(); ++i)
+                OberonTypePtr ot = resolveType(*sec.formalType);
+                llvm::Type*   lt = toLLVM(ot);
+                bool isOpenArr = (ot->kind == TypeKind::Array && ot->isOpen);
+                if (sec.isVar || ot->kind == TypeKind::Array)
+                    lt = llvm::PointerType::get(isOpenArr ? toLLVM(ot->elem) : lt, 0);
+                for (size_t i = 0; i < sec.names.size(); ++i) {
                     paramTys.push_back(lt);
+                    openFlags.push_back(isOpenArr);
+                    if (isOpenArr)
+                        paramTys.push_back(llvm::Type::getInt64Ty(ctx_)); // hidden length
+                }
             }
         }
 
         llvm::Type* retTy = llvm::Type::getVoidTy(ctx_);
-        if (pd->params && !pd->params->retIdent.empty()) {
-            auto it = typeTable_.find(pd->params->retIdent);
-            if (it != typeTable_.end())
-                retTy = toLLVM(it->second);
-        }
+        if (pd->params && !pd->params->retIdent.empty())
+            retTy = toLLVM(resolveTypeName(pd->params->retModule,
+                                            pd->params->retIdent));
 
         auto* ft = llvm::FunctionType::get(retTy, paramTys, false);
         auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                            fname, llvmMod_.get());
+        openArrayFormals_[fn] = std::move(openFlags);
         extFuncs_[alias + "_" + pd->name] = fn;
     }
 
@@ -596,115 +729,10 @@ void CodeGen::loadModuleInterface(const std::string& alias,
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Import exported TYPE declarations.
-    //
-    // Two-pass approach (mirrors registerTypeDecls / fillTypeDecls):
-    //
-    // Pass 1 — create stubs for every exported type, registered under both
-    //   the alias-qualified key ("alias_TypeName", permanent) and a short key
-    //   ("TypeName", temporary).  The short key lets resolveType resolve
-    //   intra-module references (e.g. PointPtr → Point) during Pass 2.
-    //
-    // Pass 2 — call resolveType to fill in field lists, base types, etc.
-    //   Short-key entries are removed afterwards to avoid polluting the
-    //   current module's namespace.
-    // -----------------------------------------------------------------------
-
-    std::vector<std::string> importTempKeys; // short names removed after import
-
-    // Adds ot under "alias_short" (permanent) and "short" (temporary).
-    auto addStub = [&](const std::string& shortName, OberonTypePtr ot) {
-        std::string qualKey = alias + "_" + shortName;
-        if (!typeTable_.contains(qualKey))
-            typeTable_[qualKey] = ot;
-        if (!typeTable_.contains(shortName)) {
-            typeTable_[shortName] = ot;
-            importTempKeys.push_back(shortName);
-        }
-    };
-
-    // Pass 1: register minimal stubs so forward references resolve in Pass 2.
-    for (auto& td : importedMod.decls.types) {
-        if (!td.exported) continue;
-        std::string qualKey = alias + "_" + td.name;
-        if (typeTable_.contains(qualKey)) continue;
-
-        OberonTypePtr stub = std::make_shared<OberonType>();
-        stub->name = td.name;
-
-        if (dynamic_cast<const RecordTypeExpr*>(td.type.get())) {
-            stub->kind = TypeKind::Record;
-            // Create a named LLVM struct so toLLVM can find it via the cache.
-            if (!llvm::StructType::getTypeByName(ctx_, qualKey))
-                llvm::StructType::create(ctx_, qualKey);
-            llvmTypeCache_[stub.get()] =
-                llvm::StructType::getTypeByName(ctx_, qualKey);
-        } else if (auto* p = dynamic_cast<const PointerTypeExpr*>(td.type.get())) {
-            stub->kind = TypeKind::Pointer;
-            if (auto* q = dynamic_cast<const QualIdentType*>(p->base.get()))
-                stub->ptrBaseName = q->ident;
-        } else if (dynamic_cast<const ProcedureTypeExpr*>(td.type.get())) {
-            stub->kind = TypeKind::Procedure;
-        } else if (dynamic_cast<const ArrayTypeExpr*>(td.type.get())) {
-            stub->kind = TypeKind::Array;
-        } else {
-            continue; // type alias or unsupported — skip
-        }
-        addStub(td.name, stub);
-    }
-
-    // Pass 2: fill in type bodies now that all stubs are visible by short name.
-    for (auto& td : importedMod.decls.types) {
-        if (!td.exported) continue;
-        std::string qualKey = alias + "_" + td.name;
-        auto existIt = typeTable_.find(qualKey);
-        if (existIt == typeTable_.end()) continue;
-        OberonTypePtr& stub = existIt->second;
-
-        try {
-            OberonTypePtr filled = resolveType(*td.type);
-            filled->name = td.name;
-
-            if (stub->kind == TypeKind::Record) {
-                // Fill the LLVM named-struct body (was opaque after Pass 1).
-                auto* st = llvm::dyn_cast_or_null<llvm::StructType>(
-                    llvm::StructType::getTypeByName(ctx_, qualKey));
-                if (st && st->isOpaque()) {
-                    std::vector<llvm::Type*> fts;
-                    for (auto& f : filled->fields)
-                        fts.push_back(toLLVM(f.type));
-                    st->setBody(fts);
-                }
-                // Update the stub in-place (other types may already hold a
-                // shared_ptr to it, so we must not replace the object).
-                stub->fields     = std::move(filled->fields);
-                stub->baseName   = std::move(filled->baseName);
-                stub->baseModule = std::move(filled->baseModule);
-            } else if (stub->kind == TypeKind::Pointer) {
-                stub->ptrBase     = filled->ptrBase;
-                stub->ptrBaseName = filled->ptrBaseName;
-                if (stub->ptrBase)
-                    llvmTypeCache_[stub.get()] =
-                        llvm::PointerType::get(toLLVM(stub->ptrBase), 0);
-            } else if (stub->kind == TypeKind::Procedure) {
-                stub->params  = std::move(filled->params);
-                stub->retType = std::move(filled->retType);
-            } else if (stub->kind == TypeKind::Array) {
-                stub->isOpen = filled->isOpen;
-                stub->length = filled->length;
-                stub->elem   = std::move(filled->elem);
-            }
-        } catch (...) {
-            // Dependency unavailable (e.g. type from a transitively imported
-            // module that wasn't loaded).  Leave the stub as-is; callers that
-            // actually use this type will get a more specific error.
-        }
-    }
-
     // Remove temporary short-name entries so they don't collide with the
     // current module's own declarations.
-    for (auto& k : importTempKeys) typeTable_.erase(k);
+    for (auto& k : importTempKeys)      typeTable_.erase(k);
+    for (auto& k : importTempConstKeys) scopes_.back().erase(k);
 
     // Resolve any pointer forward-references that Pass 2 left unresolved
     // (happens when the pointer's base type wasn't yet a stub when the pointer
@@ -830,17 +858,23 @@ void CodeGen::declareProcs(const std::vector<std::shared_ptr<ProcDecl>>& procs) 
     for (auto& pd : procs) {
         std::string fname = modName_ + "_" + pd->name;
 
-        // Build LLVM parameter types
+        // Build LLVM parameter types.
+        // Open arrays (ARRAY OF T) are passed as two params: ptr + i64 length.
         std::vector<llvm::Type*> paramTys;
+        std::vector<bool> openFlags; // true at index i → formal i is open array
         if (pd->params) {
             for (auto& sec : pd->params->sections) {
                 OberonTypePtr ot = resolveType(*sec.formalType);
                 llvm::Type*   lt = toLLVM(ot);
+                bool isOpenArr = (ot->kind == TypeKind::Array && ot->isOpen);
                 if (sec.isVar || ot->kind == TypeKind::Array)
-                    lt = llvm::PointerType::get(
-                             ot->isOpen ? toLLVM(ot->elem) : lt, 0);
-                for (size_t i = 0; i < sec.names.size(); ++i)
+                    lt = llvm::PointerType::get(isOpenArr ? toLLVM(ot->elem) : lt, 0);
+                for (size_t i = 0; i < sec.names.size(); ++i) {
                     paramTys.push_back(lt);
+                    openFlags.push_back(isOpenArr);
+                    if (isOpenArr)
+                        paramTys.push_back(llvm::Type::getInt64Ty(ctx_)); // hidden length
+                }
             }
         }
         llvm::Type* retTy = llvm::Type::getVoidTy(ctx_);
@@ -851,6 +885,7 @@ void CodeGen::declareProcs(const std::vector<std::shared_ptr<ProcDecl>>& procs) 
         auto* ft = llvm::FunctionType::get(retTy, paramTys, false);
         auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                            fname, llvmMod_.get());
+        openArrayFormals_[fn] = std::move(openFlags);
 
         // Register in symbol table so the procedure can be used as a first-class
         // value (e.g. assigned to a procedure variable: p.handler := MyProc).
@@ -898,15 +933,30 @@ void CodeGen::genProc(const ProcDecl& pd) {
                     // VAR or open-array param: argument IS the pointer
                     sym.llvmVal = &*argIt;
                     sym.isVar   = true;
+                    argIt->setName(pname);
+                    addSym(pname, std::move(sym));
+                    ++argIt;
+                    if (ot->kind == TypeKind::Array && ot->isOpen) {
+                        // Bind the hidden length argument to "__len_<name>".
+                        auto* lenAlloca = createEntryAlloca(
+                            fn, llvm::Type::getInt64Ty(ctx_), "__len_" + pname);
+                        b_->CreateStore(&*argIt, lenAlloca);
+                        argIt->setName("__len_" + pname);
+                        Symbol lenSym;
+                        lenSym.type    = typeTable_["INTEGER"];
+                        lenSym.llvmVal = lenAlloca;
+                        addSym("__len_" + pname, std::move(lenSym));
+                        ++argIt;
+                    }
                 } else {
                     // Value param: create alloca, store argument
                     llvm::Type* lt = toLLVM(ot);
                     sym.llvmVal = createEntryAlloca(fn, lt, pname);
                     b_->CreateStore(&*argIt, sym.llvmVal);
+                    argIt->setName(pname);
+                    addSym(pname, std::move(sym));
+                    ++argIt;
                 }
-                argIt->setName(pname);
-                addSym(pname, std::move(sym));
-                ++argIt;
             }
         }
     }
