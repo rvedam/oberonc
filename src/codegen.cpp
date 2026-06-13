@@ -764,12 +764,21 @@ void CodeGen::genConstDecls(const std::vector<ConstDecl>& decls, bool global) {
         sym.isConst = true;
         if (auto* s = dynamic_cast<const StringLitExpr*>(cd.value.get())) {
             std::string content = parseStrContent(s->raw);
+            bool isHexChar = !s->raw.empty() && s->raw.back() == 'X';
+            bool isCharLit = isHexChar || content.size() == 1;
+            if (isCharLit) {
+                // Single-char or hex char constant: register as CHAR (i8), not String (ptr).
+                unsigned char cv = content.empty() ? '\0' : static_cast<unsigned char>(content[0]);
+                sym.type    = typeTable_["CHAR"];
+                sym.llvmVal = llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), cv);
+            } else {
             auto* gv = getOrCreateStrLit(content);
             auto t = std::make_shared<OberonType>();
             t->kind = TypeKind::String;
             t->name = "STRING";
             sym.type    = t;
             sym.llvmVal = gv;
+            }
         } else if (auto* i = dynamic_cast<const IntLitExpr*>(cd.value.get())) {
             sym.type    = typeTable_["INTEGER"];
             sym.llvmVal = llvm::ConstantInt::get(

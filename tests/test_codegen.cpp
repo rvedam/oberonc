@@ -178,3 +178,115 @@ END Importer.
     // Should succeed — x is INTEGER (local), NonExistentModule types are unused
     CHECK(err.empty());
 }
+
+// -----------------------------------------------------------------------
+// CHAR literals: single-char strings and hex char constants must be
+// emitted as i8 values, not as global string pointers.
+//
+// The critical case is CONST declarations: "versionkey = 1X" and
+// "sentinel = "O"" were previously registered as TypeKind::String
+// (global ptr), causing icmp i8 vs ptr verifier failures when
+// compared against a CHAR variable.
+// -----------------------------------------------------------------------
+
+TEST_CASE("Char literal: hex char constants 0AX-0EX in direct comparison",
+          "[codegen][char]") {
+    auto err = tryCompile(R"(
+MODULE CharTest;
+  VAR ch: CHAR;
+BEGIN
+  IF ch = 0AX THEN END;
+  IF ch = 0BX THEN END;
+  IF ch = 0CX THEN END;
+  IF ch = 0DX THEN END;
+  IF ch = 0EX THEN END;
+END CharTest.
+)");
+    CHECK(err.empty());
+}
+
+TEST_CASE("Char literal: single-char strings A-E in direct comparison",
+          "[codegen][char]") {
+    auto err = tryCompile(R"(
+MODULE CharTest;
+  VAR ch: CHAR;
+BEGIN
+  IF ch = "A" THEN END;
+  IF ch = "B" THEN END;
+  IF ch = "C" THEN END;
+  IF ch = "D" THEN END;
+  IF ch = "E" THEN END;
+END CharTest.
+)");
+    CHECK(err.empty());
+}
+
+TEST_CASE("Char literal: hex char CONST used in comparison (was i8 vs ptr bug)",
+          "[codegen][char]") {
+    // CONST with hex char must be registered as CHAR (i8), not String (ptr).
+    // Before fix: genConstDecls stored 1X as a GlobalVariable (String),
+    // producing "icmp eq i8 %ch, ptr @.str" which fails LLVM verification.
+    auto err = tryCompile(R"(
+MODULE CharTest;
+  CONST versionkey = 1X; nl = 0AX; cr = 0DX; eof = 0X;
+  VAR ch: CHAR;
+BEGIN
+  IF ch = versionkey THEN END;
+  IF ch # nl THEN END;
+  IF ch = cr THEN END;
+  IF ch = eof THEN END;
+END CharTest.
+)");
+    CHECK(err.empty());
+}
+
+TEST_CASE("Char literal: single-char string CONST used in comparison (was i8 vs ptr bug)",
+          "[codegen][char]") {
+    // CONST with single-char string must also be registered as CHAR (i8).
+    auto err = tryCompile(R"(
+MODULE CharTest;
+  CONST sentinel = "O"; dot = "."; space = " ";
+  VAR ch: CHAR;
+BEGIN
+  IF ch = sentinel THEN END;
+  IF ch # dot THEN END;
+  IF ch = space THEN END;
+END CharTest.
+)");
+    CHECK(err.empty());
+}
+
+TEST_CASE("Char literal: assigned to CHAR variable",
+          "[codegen][char]") {
+    auto err = tryCompile(R"(
+MODULE CharTest;
+  CONST cr = 0DX;
+  VAR ch: CHAR;
+BEGIN
+  ch := "A";
+  ch := 0AX;
+  ch := cr;
+  ch := 0X;
+END CharTest.
+)");
+    CHECK(err.empty());
+}
+
+TEST_CASE("Char literal: passed as CHAR procedure argument",
+          "[codegen][char]") {
+    // Char literal or const passed to a CHAR parameter must emit i8, not ptr.
+    auto err = tryCompile(R"(
+MODULE CharTest;
+  CONST nl = 0AX;
+  PROCEDURE Eat(c: CHAR);
+  BEGIN
+  END Eat;
+BEGIN
+  Eat("A");
+  Eat(0DX);
+  Eat(nl);
+  Eat("E");
+END CharTest.
+)");
+    CHECK(err.empty());
+}
