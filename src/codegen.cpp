@@ -710,7 +710,6 @@ void CodeGen::loadModuleInterface(const std::string& alias,
 
     // Declare each exported variable as an external LLVM global.
     // Register in the symbol table as "alias_varName" so genAddr can find it.
-    auto* i64 = llvm::Type::getInt64Ty(ctx_);
     for (auto& vd : importedMod.decls.vars) {
         for (size_t ni = 0; ni < vd.names.size(); ++ni) {
             if (ni < vd.exported.size() && !vd.exported[ni]) continue;
@@ -719,12 +718,13 @@ void CodeGen::loadModuleInterface(const std::string& alias,
             std::string symKey = alias + "_" + vname;
             if (lookupSym(symKey)) continue; // already registered
 
-            // Resolve the LLVM type from the var's type expression
-            llvm::Type* lt = i64; // default INTEGER/SET
-            if (auto* q = dynamic_cast<const QualIdentType*>(vd.type.get())) {
-                auto it = typeTable_.find(q->ident);
-                if (it != typeTable_.end()) lt = toLLVM(it->second);
-            }
+            // Resolve the Oberon type and corresponding LLVM type.
+            // resolveType handles QualIdentType (e.g. Viewers.Viewer → "Viewers_Viewer"
+            // permanent key) and inline records (e.g. Oberon.Par's RECORD … END).
+            OberonTypePtr oty;
+            try { oty = resolveType(*vd.type); } catch (...) {}
+            if (!oty) oty = typeTable_["INTEGER"];
+            llvm::Type* lt = toLLVM(oty);
 
             // Create (or reuse) an external global variable declaration
             auto* gv = llvmMod_->getGlobalVariable(gname);
@@ -732,14 +732,6 @@ void CodeGen::loadModuleInterface(const std::string& alias,
                 gv = new llvm::GlobalVariable(*llvmMod_, lt,
                          /*isConst=*/false, llvm::GlobalValue::ExternalLinkage,
                          /*init=*/nullptr, gname);
-
-            // Determine the Oberon type
-            OberonTypePtr oty;
-            if (auto* q = dynamic_cast<const QualIdentType*>(vd.type.get())) {
-                auto it = typeTable_.find(q->ident);
-                if (it != typeTable_.end()) oty = it->second;
-            }
-            if (!oty) oty = typeTable_["INTEGER"];
 
             Symbol sym;
             sym.type    = oty;

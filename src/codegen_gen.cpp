@@ -1012,12 +1012,15 @@ void CodeGen::genCall(const ProcCallStmt& s) {
     // This happens when:
     //   (a) d.module is set but is NOT an imported module — e.g., F.handle(…)
     //       parsed as qualident{module="F", ident="handle"} where F is a variable.
-    //   (b) d.module is empty but d.ident is a local symbol of Procedure type —
+    //   (b) d.module is an imported module BUT the designator has selectors —
+    //       e.g., Oberon.FocusViewer.handle(…) where FocusViewer is a module VAR.
+    //   (c) d.module is empty but d.ident is a local symbol of Procedure type —
     //       e.g., a bare procedure-variable call p(…).
     // Note: symbols registered for direct procedures (llvmVal is a Function, not
     // an alloca/global) are excluded — those take the direct-call path below.
     {
-        bool isFieldCall = !d.module.empty() && !importedModules_.contains(d.module);
+        bool isFieldCall = !d.module.empty() &&
+                           (!importedModules_.contains(d.module) || !d.selectors.empty());
         Symbol* procSym  = nullptr;
         if (!isFieldCall && d.module.empty())
             procSym = lookupSym(d.ident);

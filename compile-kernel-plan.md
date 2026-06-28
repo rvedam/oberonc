@@ -8,7 +8,7 @@ We want to compile all 14 non-demo Project Oberon modules into a bootable apple-
 
 ---
 
-## Current Status (2026-06-13, post Bug-2a fix — 11/14 pass)
+## Current Status (2026-06-28, post Bug-2b/Bug-3 fix — 13/14 pass)
 
 ### Trial run command
 ```bash
@@ -20,7 +20,7 @@ mkdir -p /tmp/po_trial && for mod in Kernel Display Input FileDir Files Modules 
 done
 ```
 
-### Build order & blocker map (11 pass, 3 fail)
+### Build order & blocker map (13 pass, 1 fail)
 
 | # | Module | Status | Error |
 |---|---|---|---|
@@ -35,9 +35,9 @@ done
 | 9 | Texts | ✅ | — |
 | 10 | Oberon | ✅ | — |
 | 11 | MenuViewers | ✅ | — |
-| 12 | **TextFrames** | ❌ | `unknown imported proc: Oberon_FocusViewer` (Bug 2b) |
-| 13 | **Edit** | ❌ | `field sel on non-record` (Bug 3) |
-| 14 | **System** | ❌ | `field sel on non-record` (Bug 3) |
+| 12 | TextFrames | ✅ | — |
+| 13 | Edit | ✅ | — |
+| 14 | **System** | ❌ | LLVM verify: `ptr` passed where `i64` expected in `Texts_WriteHex` call (Bug 4) |
 
 ### All applied fixes
 
@@ -56,8 +56,10 @@ done
 | Char literals emit `i8` not `ptr` | bfc5442 | Single-char and hex-char string literals → `ConstantInt::get(i8, v)` |
 | **Stale `llvmTypeCache_` fix** | **28bb516** | **See Bug 1 below** |
 | **Recursive transitive import loading** | **3f228f0** | **See Bug 2 below** |
-| **IS operator short-circuit in genExpr** | **current** | Bug 2a: skip RHS eval for `X IS T`; return true |
-| **isFieldCall broadened to selector chains** | **current** | proc-var call through imported module var's field works |
+| **IS operator short-circuit in genExpr** | **fa03276** | Bug 2a: skip RHS eval for `X IS T`; return true |
+| **isFieldCall broadened to selector chains in genCallVal** | **fa03276** | proc-var call through imported module var's field works in expressions |
+| **isFieldCall broadened in genCall (statements)** | **current** | Bug 2b: same broadening applied to statement call path; unblocks TextFrames |
+| **VAR type resolution uses resolveType** | **current** | Bug 2b+3: replaces narrow QualIdentType lookup with resolveType(*vd.type); handles cross-module pointer types and inline records; unblocks Edit, System (partially) |
 
 ---
 
@@ -119,24 +121,39 @@ done
 
 ---
 
-### Bug 3 — `field sel on non-record` (Edit, System)
+### Bug 3 — `field sel on non-record` (Edit, System) — ✅ FIXED (current)
 
 **Symptom:** Field access on `Oberon.Par` (e.g. `Oberon.Par.text`) fails because `Par` resolves to type INTEGER.
 
-**Root cause:** The VAR import code in `loadModuleInterface` (~line 703) only handles `QualIdentType` (named type reference). `Oberon.Par` is declared with an **inline record type** (`RECORD vwr: Viewers.Viewer; frame: Display.Frame; text: Texts.Text; pos: LONGINT END`). The `dynamic_cast<QualIdentType*>` returns null, `oty` stays null, and falls back to INTEGER.
+**Root cause:** The VAR import code in `loadModuleInterface` only handles `QualIdentType` (named type reference). `Oberon.Par` is declared with an **inline record type** (`RECORD vwr: Viewers.Viewer; frame: Display.Frame; text: Texts.Text; pos: LONGINT END`). The `dynamic_cast<QualIdentType*>` returns null, `oty` stays null, and falls back to INTEGER.
 
-**Fix:** In the VAR section of `loadModuleInterface`, replace the narrow `QualIdentType`-only type resolution with a general `resolveType(*vd.type)` call wrapped in try/catch:
+**Fix:** In the VAR section of `loadModuleInterface`, replaced the narrow `QualIdentType`-only type resolution with `resolveType(*vd.type)` wrapped in try/catch. This same change also fixed Bug 2b (Viewers.Viewer lookup via qualified permanent key `"Viewers_Viewer"`).
 
-```cpp
-OberonTypePtr oty;
-try { oty = resolveType(*vd.type); } catch (...) {}
-if (!oty) oty = typeTable_["INTEGER"];
-llvm::Type* lt = toLLVM(oty);
+**Unblocked:** Edit ✅, System (partially — new Bug 4 now surfaces)
+
+---
+
+### Bug 4 — `ptr` passed where `i64` expected in `Texts_WriteHex` call (System)
+
+**Symptom:** LLVM module verification failure when compiling System.Mod:
+```
+Call parameter type does not match function signature!
+  %M9 = load ptr, ptr %M, align 8
+ i64  call void @Texts_WriteHex(ptr @System_W, ptr %M9)
 ```
 
-This works because Edit/System both load Viewers, Texts, and Display before Oberon in their import lists, so those types are already in `typeTable_` when `resolveType` runs on `Par`'s inline record.
+**Context:** `Texts.WriteHex(VAR W: Writer; x: LONGINT)` — second param is `LONGINT` (i64). System.Mod calls it as `Texts.WriteHex(W, ORD(M))` and `Texts.WriteHex(W, M.code)` (System.Mod lines 320–321, 404, 411).
 
-**Unblocks:** Edit, System (once Bugs 1 and 2 are also fixed).
+**Likely root cause (TBD):** Either:
+- `ORD(M)` where `M` is a `Modules.Module` pointer is not emitting `ptrtoint` — the pointer value is passed raw instead of converted to i64; OR
+- `M.code` is a field whose resolved type comes out as a pointer type instead of INTEGER (e.g. codegen resolves it as `ptr` because the field type in the loaded Modules.Mod interface is wrong).
+
+**Investigation needed:**
+1. Check which specific call site produces the bad IR (add debugging or look at the generated .ll).
+2. Check `Modules.ModDesc`'s `code` field type — if it's correctly typed as INTEGER.
+3. Check how `ORD()` is handled in codegen: does it emit `ptrtoint` for pointer arguments?
+
+**Unblocks:** System ✅ (last module, enables full 14/14 compilation).
 
 ---
 
