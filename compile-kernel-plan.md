@@ -8,7 +8,7 @@ We want to compile all 14 non-demo Project Oberon modules into a bootable apple-
 
 ---
 
-## Current Status (2026-06-28, post Bug-2b/Bug-3 fix — 13/14 pass)
+## Current Status (2026-06-28, post Bug-4 fix — 14/14 pass)
 
 ### Trial run command
 ```bash
@@ -37,7 +37,7 @@ done
 | 11 | MenuViewers | ✅ | — |
 | 12 | TextFrames | ✅ | — |
 | 13 | Edit | ✅ | — |
-| 14 | **System** | ❌ | LLVM verify: `ptr` passed where `i64` expected in `Texts_WriteHex` call (Bug 4) |
+| 14 | System | ✅ | — |
 
 ### All applied fixes
 
@@ -60,6 +60,7 @@ done
 | **isFieldCall broadened to selector chains in genCallVal** | **fa03276** | proc-var call through imported module var's field works in expressions |
 | **isFieldCall broadened in genCall (statements)** | **current** | Bug 2b: same broadening applied to statement call path; unblocks TextFrames |
 | **VAR type resolution uses resolveType** | **current** | Bug 2b+3: replaces narrow QualIdentType lookup with resolveType(*vd.type); handles cross-module pointer types and inline records; unblocks Edit, System (partially) |
+| **ORD emits ptrtoint for pointer args** | **current** | Bug 4: ORD(pointer) now emits ptrtoint i64 instead of passing raw ptr; unblocks System |
 
 ---
 
@@ -133,7 +134,7 @@ done
 
 ---
 
-### Bug 4 — `ptr` passed where `i64` expected in `Texts_WriteHex` call (System)
+### Bug 4 — `ptr` passed where `i64` expected in `Texts_WriteHex` call (System) — ✅ FIXED
 
 **Symptom:** LLVM module verification failure when compiling System.Mod:
 ```
@@ -142,18 +143,17 @@ Call parameter type does not match function signature!
  i64  call void @Texts_WriteHex(ptr @System_W, ptr %M9)
 ```
 
-**Context:** `Texts.WriteHex(VAR W: Writer; x: LONGINT)` — second param is `LONGINT` (i64). System.Mod calls it as `Texts.WriteHex(W, ORD(M))` and `Texts.WriteHex(W, M.code)` (System.Mod lines 320–321, 404, 411).
+**Root cause:** `ORD(M)` where `M: Modules.Module` is a pointer type. The `ORD` handler called `coerce(v, i64)` but `coerce` has no `ptr → i64` path — it silently returned the `ptr` unchanged, causing a type mismatch at the `Texts_WriteHex` call site.
 
-**Likely root cause (TBD):** Either:
-- `ORD(M)` where `M` is a `Modules.Module` pointer is not emitting `ptrtoint` — the pointer value is passed raw instead of converted to i64; OR
-- `M.code` is a field whose resolved type comes out as a pointer type instead of INTEGER (e.g. codegen resolves it as `ptr` because the field type in the loaded Modules.Mod interface is wrong).
+**Fix:** Added `ptrtoint` to the `ORD` handler in `codegen_gen.cpp`:
+```cpp
+if (v->getType()->isPointerTy())
+    return b_->CreatePtrToInt(v, i64, "ord");
+```
 
-**Investigation needed:**
-1. Check which specific call site produces the bad IR (add debugging or look at the generated .ll).
-2. Check `Modules.ModDesc`'s `code` field type — if it's correctly typed as INTEGER.
-3. Check how `ORD()` is handled in codegen: does it emit `ptrtoint` for pointer arguments?
+**Files changed:** `src/codegen_gen.cpp`
 
-**Unblocks:** System ✅ (last module, enables full 14/14 compilation).
+**Unblocked:** System ✅ — all 14/14 Project Oberon modules now compile to LLVM IR.
 
 ---
 

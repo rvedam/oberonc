@@ -2,7 +2,7 @@
 // Compile with: -ffreestanding -mno-red-zone -O2
 
 #include "../hal.hpp"
-#include <cstdint>
+#include "../../compat_stdint.hpp"
 
 // ---------------------------------------------------------------------------
 // Port I/O helpers

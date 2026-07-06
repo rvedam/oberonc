@@ -3,8 +3,7 @@
 // Implements Out.*, In.*, and Oberon_NEW using only the HAL.
 // BSS is guaranteed zeroed by the boot stub; heap[] lives in BSS.
 
-#include <cstdint>
-#include <cstddef>
+#include "compat_stdint.hpp"
 #include "platform/hal.hpp"
 
 // ---------------------------------------------------------------------------

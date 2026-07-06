@@ -2,7 +2,7 @@
 // Compile with: -ffreestanding -O2  (requires AArch64 target)
 
 #include "../hal.hpp"
-#include <cstdint>
+#include "../../compat_stdint.hpp"
 
 // ---------------------------------------------------------------------------
 // PL011 UART register offsets

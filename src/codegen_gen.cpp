@@ -675,11 +675,13 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
             error("LEN: argument must be an array variable");
         }
 
-        // ORD(c) — ordinal of CHAR, BOOLEAN, SET, or REAL (bit reinterpretation)
+        // ORD(c) — ordinal of CHAR, BOOLEAN, SET, REAL, or pointer (ptrtoint)
         if (d.ident == "ORD" && args.size() == 1) {
             auto* v = genExpr(*args[0]);
             if (v->getType()->isDoubleTy())
                 return b_->CreateBitCast(v, i64, "ord");
+            if (v->getType()->isPointerTy())
+                return b_->CreatePtrToInt(v, i64, "ord");
             return coerce(v, i64);
         }
 

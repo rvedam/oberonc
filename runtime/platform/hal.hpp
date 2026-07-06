@@ -1,5 +1,4 @@
 #pragma once
-#include <cstdint>
 
 // Hardware Abstraction Layer — freestanding Oberon runtime.
 // Implemented per-platform in runtime/platform/<arch>/hal.cpp.
