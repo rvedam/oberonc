@@ -251,10 +251,20 @@ void In_Real(double* x) {
 static uint8_t heap[1 << 20]; // 1 MiB; zeroed by boot stub (BSS)
 static size_t  heap_ptr = 0;
 
+// Kernel.Mod's own dummy free-list heap (Kernel.Init/Mark/Scan) is carved out
+// of the tail of this same array, with Oberon_NEW's bump limit capped below
+// it. Kernel.Mark treats every pointer >= heapOrg as having an 8-byte
+// Kernel-format header (tag + mark word); Oberon_NEW's objects are
+// header-less. Keeping the two regions disjoint by construction — rather
+// than by convention — means Kernel.Mark can never misinterpret a real
+// Oberon_NEW object as a Kernel-format block.
+static constexpr size_t KERNEL_HEAP_RESERVE = 64 * 1024;
+static constexpr size_t OBERON_NEW_LIMIT    = sizeof(heap) - KERNEL_HEAP_RESERVE;
+
 void* Oberon_NEW(int64_t size) {
     if (size <= 0) size = 1;
     size_t aligned = (static_cast<size_t>(size) + 15u) & ~15u;
-    if (heap_ptr + aligned > sizeof(heap)) {
+    if (heap_ptr + aligned > OBERON_NEW_LIMIT) {
         bare_puts("Oberon runtime: out of memory\n");
         hal_halt();
     }
@@ -262,5 +272,12 @@ void* Oberon_NEW(int64_t size) {
     heap_ptr += aligned;
     return p; // BSS is zeroed by boot stub
 }
+
+// Backing values for Kernel.Mod's Init procedure (Kernel.Mod: MemLim :=
+// HAL.MemLimit(); heapOrg := HAL.HeapOrigin()). Shared (not per-platform)
+// because correctness depends on being defined relative to the exact same
+// static array Oberon_NEW uses above.
+int64_t HAL_HeapOrigin() { return reinterpret_cast<int64_t>(heap + OBERON_NEW_LIMIT); }
+int64_t HAL_MemLimit()   { return reinterpret_cast<int64_t>(heap + sizeof(heap)); }
 
 } // extern "C"

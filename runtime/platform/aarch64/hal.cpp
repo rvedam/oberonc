@@ -72,4 +72,23 @@ int hal_getc() {
 #endif
 }
 
-void hal_display_flush() {} // AArch64: no VBE display
+// Shadow framebuffer: 1bpp, 1024×768 packed. Stride = 1024/8 = 128 bytes.
+// Same layout Display.Mod already assumes on x86_64 (see
+// platform/x86_64/hal.cpp's SHADOW_BASE comment). Unlike x86_64, aarch64 has
+// no real backing memory at the RISC5-era literal address 0x0E7F00 (QEMU
+// virt's RAM starts at 0x40000000), so this lives in our own BSS instead —
+// Display.Mod now reads the address via HAL.FramebufferBase() rather than a
+// hardcoded literal (see src/codegen.cpp's HAL pseudo-module), so this is a
+// transparent substitution from the Oberon source's point of view.
+static constexpr int FB_W = 1024, FB_H = 768;
+static uint8_t shadow_fb[FB_H][FB_W / 8]; // 98,304 bytes, zeroed by boot stub (BSS)
+
+int64_t HAL_FramebufferBase() {
+    return reinterpret_cast<int64_t>(&shadow_fb[0][0]);
+}
+
+// TODO(Bug 6 / Step 9): drive a real QEMU `virt` display device (ramfb) and
+// blit shadow_fb into it here. Until then this is a no-op, same as before —
+// Display.Mod can now write to shadow_fb without faulting, but nothing
+// reads it yet.
+void hal_display_flush() {}

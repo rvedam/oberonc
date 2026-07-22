@@ -299,3 +299,226 @@ Fix in this order to unblock the most downstream modules earliest:
 3. **Bug 3 — inline record VAR import** — unblocks Edit, System
 4. **CMakeLists.txt** (Step 6) — automates full kernel build
 5. **Runtime stubs** (Step 7) — enables link + QEMU boot
+
+---
+
+## Bug 5 — Boot-time hardcoded RISC5 physical addresses (Kernel.Init, Display.Mod) — 🔧 IN PROGRESS (2026-07-21)
+
+All 14 modules now compile and link (see Status above), but the original Wirth source hardcodes several RISC5-hardware physical addresses as literal constants, which `oberonc` compiles literally (no compile-time-constant requirement on `SYSTEM.PUT`/`GET` addresses — they're generic runtime `i64` values, `codegen_gen.cpp`). These addresses only happen to be valid on x86_64/QEMU by luck of memory layout, and even there, one boot-time code path has never actually been exercised on either architecture.
+
+### Symptom
+
+Two independent hardcoded-address problems, discovered while planning an aarch64 display driver:
+
+1. **`Display.Mod:6`** — `CONST base = 0E7F00H;` (framebuffer base). Valid free RAM on x86_64/QEMU (below the 1 MiB kernel load address), but **not valid on aarch64/QEMU `virt`**, where RAM starts at `0x40000000`. Every drawing procedure (`Dot`, `ReplConst`, `CopyPattern`, `CopyBlock`, `ReplPattern`) computes `base + <offset>` and does raw `SYSTEM.PUT`/`GET` — a write/read there on aarch64 would fault or go nowhere, since nothing backs that address.
+
+2. **`Kernel.Mod:250-269`** (`Install`, `Trap`, `Init`) —
+   - `Install(Padr, at)`: `SYSTEM.PUT(at, 0E7000000H + (Padr - at) DIV 4 - 1)` — writes a **RISC5 branch-instruction opcode** (raw machine code) into physical address `at`. Meaningless on x86_64 (IDT-based) or aarch64 (`VBAR_EL1`-based) — neither models this convention at all.
+   - `Init*`: calls `Install(SYSTEM.ADR(Trap), 20H)` (writes to physical `0x20`), then `SYSTEM.GET(12, MemLim); SYSTEM.GET(24, heapOrg)` — reads heap size/origin from fixed physical addresses 12/24, a RISC5 FPGA-bootloader convention nothing in our boot path populates.
+   - **This is not dead/unreachable code**: `Files.Mod:483` — `BEGIN root := 0; Kernel.Init; FileDir.Init` — `Files` is module #5 of 14 in the topological init order, so `Kernel.Init` runs automatically during `oberon_main`, before `Display`/`Oberon`/etc. initialize, on **both** architectures.
+
+Neither architecture has ever booted the full 14-module kernel far enough to exercise this: aarch64 IR compiles/links (`build/project_oberon_aarch64.elf` exists) but QEMU boot itself is unresolved/unverified (see project memory); x86_64 has no full-kernel CMake target at all (only the trivial Hello-World `kernel` target). So this isn't "the aarch64 fix must avoid regressing a working x86_64 path" — both targets are equally untested here.
+
+### Root cause
+
+`oberonc`'s `SYSTEM.PUT`/`GET`/`ADR` codegen (`codegen_gen.cpp`) treats the address argument as an ordinary runtime expression — no special-casing, no compile-time-constant requirement. The literal addresses are baked in purely because the *source* wrote them that way (faithful, unmodified Wirth text), not because the compiler forces it. This means a HAL-indirection fix (source reads a runtime value instead of a literal) works with **zero compiler changes beyond adding the new import**, and compiles identically for both architectures (the frontend/IR-gen pipeline never branches on target arch — only `llc`/`ld` and the per-platform HAL bodies differ downstream).
+
+**Investigation also surfaced two things that simplify/derisk the fix:**
+- `INTEGER`/`LONGINT` are 64-bit (`i64`) in this compiler (`codegen.cpp:264-266`), not Wirth's original 32-bit — so any new HAL call can just return `i64` uniformly, no coercion subtlety.
+- `Kernel.Install`/`Trap` (and `System.Mod:417`'s identical second `Kernel.Install` call) are **already fully dead code today, independent of this fix**: `ASSERT` compiles directly to extern `Oberon_Trap()` (`codegen_gen.cpp:973-984`); `NEW` compiles directly to extern `Oberon_NEW()` (`codegen_gen.cpp:992-1008`); `SYSTEM.REG`/`SYSTEM.H` always fold to constant `0` (`codegen_gen.cpp:547-559`). Nothing ever installs a real IDT/`VBAR_EL1` entry that would fetch address `0x20` as an instruction. So dropping `Install`'s call from `Kernel.Init` removes a write to unmapped memory that already served no purpose.
+
+### Fix (design; not yet implemented)
+
+Add a new `HAL` pseudo-module (no `.Mod` source file, exactly like the existing `Out`/`In` pattern) exposing three niladic `INTEGER`-returning calls: `HAL.FramebufferBase()`, `HAL.HeapOrigin()`, `HAL.MemLimit()`. Requires **only** a new branch in `genImports` (`src/codegen.cpp`, alongside the existing `Out`/`In` branches ~line 454-465) — `genCallVal`'s existing generic `module + "_" + ident` resolution (`codegen_gen.cpp:793-800`) already handles the call sites with no further compiler changes.
+
+- **`Display.Mod`**: `IMPORT SYSTEM, HAL;`, delete the `base` literal, `Base := HAL.FramebufferBase()` in the module body, redirect the 6 internal `base` usages to the exported `Base` VAR (which already existed, just previously redundant).
+- **`Kernel.Mod`**: `IMPORT SYSTEM, HAL;`, in `Init*` drop the `Install(SYSTEM.ADR(Trap), 20H)` call and replace `SYSTEM.GET(12, MemLim); SYSTEM.GET(24, heapOrg)` with `MemLim := HAL.MemLimit(); heapOrg := HAL.HeapOrigin();`. `Install`/`Trap` bodies and `System.Mod:417`'s call site are left untouched (confirmed harmless dead code).
+- **Two-heap collision risk, must be designed out**: `Oberon_NEW` (`oberon_runtime_bare.cpp`) is a header-less bump allocator; `Kernel.Mark` (live-called from `Oberon.GC`) assumes every pointer `>= heapOrg` has an 8-byte Kernel-format header and will corrupt memory if `HAL.HeapOrigin()` overlaps `Oberon_NEW`'s arena. Fix: implement `HAL_HeapOrigin`/`HAL_MemLimit` in the **shared** `oberon_runtime_bare.cpp` (not per-arch), carving Kernel's dummy heap out of the *tail* of the same static `heap[1<<20]` array, with `Oberon_NEW`'s bump limit capped strictly below it — disjointness by construction, not convention.
+- **`HAL_FramebufferBase`** is genuinely per-platform: x86_64 (`runtime/platform/x86_64/hal.cpp`) returns the existing `SHADOW_BASE` (`0x0E7F00`) unchanged — byte-identical runtime behavior to today. aarch64 (`runtime/platform/aarch64/hal.cpp`) returns the address of a new static `shadow_fb[768][128]` BSS buffer (aarch64 currently has no display buffer of any kind).
+
+**Files to change:** `src/codegen.cpp`, `project-oberon/Display.Mod`, `project-oberon/Kernel.Mod`, `runtime/oberon_runtime_bare.cpp`, `runtime/platform/x86_64/hal.cpp`, `runtime/platform/aarch64/hal.cpp`.
+
+**Unblocks:** a testable boot path past `Files_init`/`Kernel.Init` on both architectures, and a real (non-garbage) framebuffer address for the Bug-6 aarch64 display driver below.
+
+**Verification:** rebuild `oberonc` + run `oberonc_tests`/`oberonc_codegen_tests` first (compiler-level regression check before touching Oberon source); compile a throwaway `IMPORT HAL; ... x := HAL.FramebufferBase()` module and inspect the `.ll`; then compile edited `Display.Mod`/`Kernel.Mod` for both `--march=x86-64` and aarch64 to confirm the `HAL` import path works on both backends.
+
+---
+
+## Bug 6 — aarch64 has no display device at all — 🔧 PLANNED (2026-07-21)
+
+### Symptom
+
+`runtime/platform/aarch64/hal.cpp`'s `hal_display_flush()` is a no-op stub (`void hal_display_flush() {}  // AArch64: no VBE display`). Unlike x86_64 (which discovers a Bochs VBE device via PCI config-space scanning and blits Display.Mod's shadow buffer to it), aarch64 has no PCI scanning, no GPU driver, and no real pixel buffer — nothing for the display driver to blit into even once Bug 5 gives it a valid shadow-buffer address.
+
+### Fix (design; not yet implemented)
+
+Use QEMU's **`ramfb`** device (decision made 2026-07-21, over virtio-gpu): guest allocates a real pixel buffer in its own RAM, writes one config struct through the `fw_cfg` interface (address/width/height/stride/format), and QEMU reads pixels directly from that guest RAM every frame — no PCI, no virtqueues, no ongoing driver protocol. QEMU `virt` exposes `fw_cfg` at a fixed, version-stable MMIO base (`0x09020000`), consistent with how `UART_BASE` is already hardcoded in this codebase — no DTB parsing needed for v1. (virtio-gpu was considered and rejected for v1: requires implementing virtqueue setup and the full virtio-gpu command protocol from scratch, ~5-10x the code for equivalent first pixels on screen.)
+
+- New `hal_display_init()` in `runtime/platform/aarch64/hal.cpp`: locate `"etc/ramfb"` via the fw_cfg file directory, write a 28-byte big-endian `RAMFBCfg{addr, fourcc, flags, width=1024, height=768, stride=4096}` pointing at a new static `ramfb_pixels[768][1024*4]` (XRGB8888, ~3 MiB BSS) through the selector+data registers.
+- New `hal_display_flush()` body: blit `shadow_fb` (1bpp, from Bug 5) → `ramfb_pixels` (XRGB8888), mirroring the shape of the existing x86_64 blit.
+- **Open risk, flagged for implementation time**: the exact `fw_cfg`/`ramfb` wire format (byte layout, fourcc constant, selector index) needs verification against `hw/display/ramfb.c`/`docs/specs/fw_cfg.txt` in the actual QEMU source tree in use — this design is from protocol knowledge, not verified against this host's QEMU version.
+- **CMake**: add `-device ramfb` to `run_kernel`/`run_project_oberon` QEMU invocations; introduce a `KERNEL_QEMU_DISPLAY` cache variable (default `none`, headless-safe) instead of hardcoding a display backend, so `-DKERNEL_QEMU_DISPLAY=cocoa` gives a real window on the Mac dev machine without breaking CI/headless runs.
+
+**Files to change:** `runtime/platform/aarch64/hal.cpp`, `CMakeLists.txt`.
+
+**Verification:** `-device ramfb -display none` + QEMU monitor `screendump` (headless-safe, inspect the resulting image for non-blank content) as the primary check; one manual `-DKERNEL_QEMU_DISPLAY=cocoa` run to visually confirm on the Mac.
+
+**Explicitly out of scope for Bugs 5/6:** `Input.Mod`'s `msAdr`/`kbdAdr` (keyboard/mouse — same hardcoded-address category, separate hardware surface), `Kernel.Mod`'s SD-card SPI disk driver (`spiCtrl`/`spiData`/`timer`, `ReadSD`/`WriteSD` — used by `FileDir.Mod`/`Files.Mod` for all filesystem access), and adding a full x86_64 14-module kernel CMake target (none exists today; only the trivial Hello-World `kernel` target does).
+
+---
+
+## Step 8: Implementation — HAL Pseudo-Module & Boot-Address Fixes (Bug 5)
+
+### 8a. `src/codegen.cpp` — new `HAL` branch in `genImports`
+
+Insert after the existing `else if (mod == "In")` block (~line 465), before the final `else { loadModuleInterface(...); }`:
+
+```cpp
+} else if (mod == "HAL") {
+    auto decl = [&](const char* fn) {
+        auto* ft = llvm::FunctionType::get(i64, {}, false);
+        extFuncs_[std::string(fn)] =
+            llvm::Function::Create(ft, llvm::Function::ExternalLinkage, fn, llvmMod_.get());
+    };
+    decl("HAL_FramebufferBase");
+    decl("HAL_HeapOrigin");
+    decl("HAL_MemLimit");
+}
+```
+
+No `codegen_gen.cpp` changes needed — `genCallVal`'s existing generic `module + "_" + ident` resolution (`codegen_gen.cpp:793-800`) already handles the Oberon-side call sites for any imported module name.
+
+### 8b. `project-oberon/Display.Mod`
+
+- `IMPORT SYSTEM;` → `IMPORT SYSTEM, HAL;`
+- Delete `CONST base = 0E7F00H;  (*adr of...*)` (line 6).
+- Module body: `BEGIN Base := base; Width := 1024; ...` → `BEGIN Base := HAL.FramebufferBase(); Width := 1024; ...`
+- Redirect the 6 internal `base` occurrences to the already-exported `Base` VAR (verified via `grep -n base Display.Mod`: lines 29, 40, 77, 108×2, 161).
+
+### 8c. `project-oberon/Kernel.Mod`
+
+- `IMPORT SYSTEM;` → `IMPORT SYSTEM, HAL;`
+- `Init*` (lines 262-269):
+
+```
+PROCEDURE Init*;
+BEGIN Install(SYSTEM.ADR(Trap), 20H);  (*install temporary trap*)
+  SYSTEM.GET(12, MemLim); SYSTEM.GET(24, heapOrg);
+  stackOrg := heapOrg; stackSize := 8000H; heapLim := MemLim;
+  ...
+```
+→
+```
+PROCEDURE Init*;
+BEGIN
+  MemLim := HAL.MemLimit(); heapOrg := HAL.HeapOrigin();
+  stackOrg := heapOrg; stackSize := 8000H; heapLim := MemLim;
+  ...
+```
+
+- Leave `Install*`/`Trap` bodies and `System.Mod:417`'s `Kernel.Install(...)` call site untouched — confirmed dead code (see Bug 5 root-cause analysis above), rewriting them is unneeded scope creep.
+
+### 8d. `runtime/oberon_runtime_bare.cpp` — shared heap split
+
+```cpp
+static uint8_t heap[1 << 20];                                    // unchanged, 1 MiB total
+static constexpr size_t KERNEL_HEAP_RESERVE = 64 * 1024;         // tail reserved for Kernel.Mod's dummy heap
+static constexpr size_t OBERON_NEW_LIMIT = sizeof(heap) - KERNEL_HEAP_RESERVE;
+static size_t heap_ptr = 0;
+
+void* Oberon_NEW(int64_t size) {
+    // ... existing alignment logic ...
+    if (heap_ptr + aligned > OBERON_NEW_LIMIT) { /* existing out-of-memory halt */ }
+    // ...
+}
+
+// Kernel.Mod's Init reads these to seed its own free-list heap, used only by
+// Kernel.Mark/Scan (Deutsch-Schorr-Waite GC over Kernel-format headered
+// blocks). This range MUST stay strictly disjoint from — and at a
+// numerically higher address than — every pointer Oberon_NEW can return, or
+// Mark will misinterpret header-less Oberon_NEW objects as Kernel-format
+// blocks and corrupt adjacent memory. Carving this out of the same static
+// array, with Oberon_NEW capped below it, makes that hold by construction.
+int64_t HAL_HeapOrigin() { return reinterpret_cast<int64_t>(heap + OBERON_NEW_LIMIT); }
+int64_t HAL_MemLimit()   { return reinterpret_cast<int64_t>(heap + sizeof(heap)); }
+```
+
+Both declared inside the existing `extern "C" { ... }` block alongside `Out_*`/`In_*`/`Oberon_NEW`/`Oberon_Trap`. Shared (not per-arch) so the disjointness invariant holds by construction in one translation unit.
+
+### 8e. `runtime/platform/x86_64/hal.cpp`
+
+```cpp
+int64_t HAL_FramebufferBase() { return static_cast<int64_t>(SHADOW_BASE); }  // == 0x0E7F00, byte-identical to today
+```
+
+Add near the existing `SHADOW_BASE` definition, inside the `extern "C"` section.
+
+### 8f. `runtime/platform/aarch64/hal.cpp`
+
+```cpp
+static constexpr int FB_W = 1024, FB_H = 768;
+static uint8_t shadow_fb[FB_H][FB_W / 8];   // 98,304 bytes, BSS — 1bpp shadow framebuffer
+
+int64_t HAL_FramebufferBase() { return reinterpret_cast<int64_t>(&shadow_fb[0][0]); }
+```
+
+### 8g. `runtime/platform/hal.hpp`
+
+Add a one-line comment noting the split: `HAL_FramebufferBase` is per-platform (`platform/<arch>/hal.cpp`), while `HAL_HeapOrigin`/`HAL_MemLimit` are shared (`oberon_runtime_bare.cpp`) — an unusual enough layout that future readers will look here first.
+
+### 8h. Verification (do in this order)
+
+1. Rebuild `oberonc`, run `./build/oberonc_tests` and `./build/oberonc_codegen_tests` — confirm the new `genImports` branch regresses nothing.
+2. Compile a throwaway module (`IMPORT HAL; VAR x: INTEGER; BEGIN x := HAL.FramebufferBase() END`) with `--emit-llvm`; inspect the `.ll` for a correct `HAL_FramebufferBase` declaration/call, before touching `Display.Mod`/`Kernel.Mod`.
+3. Compile edited `Display.Mod`/`Kernel.Mod` with `--init-only --module-path project-oberon`, `llc --march=x86-64`, to confirm the `HAL` import path also works on x86_64 codegen (no full x86_64 kernel link exists to test end-to-end).
+4. `cmake --build build --target project_oberon_kernel` (apple-aarch64), then `run_project_oberon` — watch `-serial stdio` for `System.Mod`'s startup banner ("Oberon V5 NW 14.4.2013", `System.Mod:369`) as a concrete proxy for "all 14 module inits completed without hanging/faulting at `Kernel.Init`."
+
+---
+
+## Step 9: Implementation — AArch64 `ramfb` Display Driver (Bug 6)
+
+Depends on Step 8 (needs a valid `HAL.FramebufferBase()` to blit from).
+
+### 9a. `runtime/platform/aarch64/hal.cpp` — real pixel buffer + fw_cfg setup
+
+```cpp
+static uint8_t ramfb_pixels[FB_H][FB_W * 4];   // XRGB8888, ~3 MiB BSS
+```
+
+New `hal_display_init()` (called from `hal_init()`):
+1. `fw_cfg` MMIO at fixed base `0x09020000` on QEMU `virt` (hardcoded, matching this codebase's existing `UART_BASE` convention — no DTB parsing for v1).
+2. Locate `"etc/ramfb"` via the fw_cfg file directory (selector `0x19` = `FW_CFG_FILE_DIR`; read big-endian file count, then scan 64-byte `{u32 size; u16 select; u16 reserved; char name[56]}` entries for `name == "etc/ramfb"`).
+3. Write a 28-byte big-endian `RAMFBCfg{addr, fourcc, flags, width=1024, height=768, stride=4096}` (`addr = &ramfb_pixels[0][0]`, fourcc = XRGB8888) through the selector+data registers.
+4. **Verify at implementation time** against `hw/display/ramfb.c`/`docs/specs/fw_cfg.txt` in the actual QEMU source tree in use — byte layout, fourcc constant, and selector index here are from protocol knowledge, not confirmed against this host's QEMU version.
+
+New `hal_display_flush()` (replacing today's no-op stub): blit `shadow_fb` (1bpp) → `ramfb_pixels` (XRGB8888), mirroring the shape of the existing x86_64 blit. Cross-check bit-packing/word order against the x86_64 blit and a known pattern (e.g. `Display.arrow`) to avoid a mirrored/shifted image.
+
+### 9b. `CMakeLists.txt`
+
+- `run_kernel` (~line 311-318) and `run_project_oberon` (~line 408-417): add `-device ramfb`.
+- Introduce a cache variable instead of hardcoding the display backend:
+  ```cmake
+  set(KERNEL_QEMU_DISPLAY "none" CACHE STRING "QEMU -display backend for run_project_oberon")
+  ...
+  COMMAND ${QEMU_AARCH64} -M virt -cpu cortex-a57 -device ramfb
+          -kernel ... -serial stdio -display ${KERNEL_QEMU_DISPLAY} -no-reboot
+  ```
+  (`-DKERNEL_QEMU_DISPLAY=cocoa` for a real window on the Mac; default `none` stays headless/CI-safe.)
+- Update the now-stale comment at `CMakeLists.txt:334-337` ("only external symbols needed are Oberon_NEW and Oberon_Trap") to mention the new `HAL_*` externs.
+- No new source files to register — `oberon_runtime_bare.cpp` and `platform/aarch64/hal.cpp` are already compiled by both the `aarch64` (Linux cross-compile) and `apple-aarch64` (Mac native) `KERNEL_ARCH` blocks, so this fix covers both automatically.
+
+### 9c. Verification
+
+1. `-device ramfb -display none` + QEMU monitor (`-monitor unix:/path,server,nowait`) `screendump` command → inspect the resulting image for non-blank content (headless/CI-safe).
+2. One manual `-DKERNEL_QEMU_DISPLAY=cocoa` run on the Mac to visually confirm.
+3. Confirm `Input.Mod` and `Kernel.Mod`'s SPI/disk path are not accidentally exercised during this verification — a crash there is expected/out-of-scope, not a regression from Bugs 5/6.
+
+### Critical files (Steps 8 + 9, combined)
+
+- `src/codegen.cpp` — `HAL` branch in `genImports`
+- `project-oberon/Display.Mod` — `base` → `HAL.FramebufferBase()` / `Base`
+- `project-oberon/Kernel.Mod` — `Init*`: drop `Install` call, use `HAL.MemLimit()`/`HAL.HeapOrigin()`
+- `runtime/oberon_runtime_bare.cpp` — shared `HAL_HeapOrigin`/`HAL_MemLimit`, `Oberon_NEW` bump-limit cap
+- `runtime/platform/aarch64/hal.cpp` — `shadow_fb`/`ramfb_pixels`, `HAL_FramebufferBase`, fw_cfg/ramfb init, real `hal_display_flush`
+- `runtime/platform/x86_64/hal.cpp` — `HAL_FramebufferBase` returning existing `SHADOW_BASE`
+- `CMakeLists.txt` — `-device ramfb`, `KERNEL_QEMU_DISPLAY` cache var, stale comment update

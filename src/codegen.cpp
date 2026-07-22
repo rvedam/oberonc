@@ -462,6 +462,16 @@ void CodeGen::genImports(const std::vector<ImportEntry>& imports) {
                 {llvm::PointerType::get(dbl, 0)}, false));
             decl("In_Char", llvm::FunctionType::get(voidTy,
                 {llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0)}, false));
+        } else if (mod == "HAL") {
+            auto decl = [&](const char* fn) {
+                auto* ft = llvm::FunctionType::get(i64, {}, false);
+                extFuncs_[std::string(fn)] =
+                    llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                            fn, llvmMod_.get());
+            };
+            decl("HAL_FramebufferBase");
+            decl("HAL_HeapOrigin");
+            decl("HAL_MemLimit");
         }
         // SYSTEM: all procedures are compiler intrinsics — no runtime declarations
         else if (mod == "SYSTEM") {

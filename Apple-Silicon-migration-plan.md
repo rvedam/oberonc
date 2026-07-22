@@ -169,3 +169,25 @@ qemu-system-aarch64 -M virt -cpu cortex-a57 \
 - **Hardware addresses**: Project Oberon modules target RISC hardware registers (e.g., `base = 0E7F00H` for VGA framebuffer, `msAdr = -40` for mouse). These will compile but produce incorrect runtime behavior on AArch64/QEMU. HAL adaptation is a follow-on task.
 - **SYSTEM intrinsics**: `SYSTEM.PUT`/`SYSTEM.GET`/`SYSTEM.ADR` etc. compile via the existing SYSTEM support in `oberonc`. Correctness on AArch64 depends on the specific intrinsic.
 - **Iterative**: Additional parse/codegen errors may surface during implementation and will be fixed as encountered.
+
+---
+
+## Part 4 — Boot-Time Hardcoded Addresses + AArch64 Display Driver (Planned, 2026-07-21)
+
+### Problem
+
+Part 3 flagged "hardware addresses" as a known limitation to be resolved by a follow-on HAL adaptation task. That investigation happened 2026-07-21 and turned up two concrete, related problems, now tracked in detail in `compile-kernel-plan.md` (Bugs 5 & 6) — this section summarizes them in migration-plan terms.
+
+1. **`Display.Mod`'s framebuffer literal (`base = 0E7F00H`) is not just "incorrect at runtime" — it's unbacked memory on AArch64.** On x86_64/QEMU that address happens to be free conventional RAM (below the 1 MiB kernel load point); on AArch64/QEMU `virt`, RAM starts at `0x40000000`, so `0xE7F00` is simply not RAM. A write there faults or goes nowhere, not "draws to the wrong pixel."
+
+2. **A second, more foundational hardcoded-address problem in `Kernel.Mod` was not previously identified**, and blocks boot on *both* architectures, not just AArch64: `Kernel.Init` (which runs automatically during boot via `Files.Mod`'s module body — `Files` is module #5 of 14 in the topological init order) writes a RISC5 opcode into physical address `0x20` and reads `MemLim`/`heapOrg` from fixed physical addresses 12/24, neither of which anything in our boot path populates. Since no full 14-module kernel has ever actually booted on either target (AArch64 IR compiles/links but QEMU boot itself remains unverified; x86_64 has no full-kernel CMake target at all — only the trivial Hello-World `kernel` target from Part 2), this is not a case of the AArch64 work needing to avoid regressing a working x86_64 path — both targets are equally untested here, and fixing it once benefits both.
+
+### Design decision
+
+Investigation confirmed `oberonc`'s Oberon→LLVM-IR codegen never branches on target architecture (`SYSTEM.PUT`/`GET`/`ADR` treat addresses as ordinary runtime `i64` expressions, no compile-time-constant requirement) — so a HAL-indirection fix requires **zero forking of the shared `.Mod` source** between architectures, consistent with this migration's overall goal of one source tree for both targets. The fix: a new `HAL` pseudo-module (mirroring the existing `Out`/`In` pattern — one `genImports` branch in `src/codegen.cpp`, no `.Mod` file) supplying `FramebufferBase()`/`HeapOrigin()`/`MemLimit()` at runtime, backed by per-platform values in `runtime/platform/<arch>/hal.cpp` (x86_64 returns the literal it already used, byte-identical behavior; AArch64 returns a real static BSS buffer, which didn't exist before). Full design, exact diffs, and the two-heap-collision risk analysis (Kernel's GC assumptions vs. `Oberon_NEW`'s header-less allocator) are in `compile-kernel-plan.md` under **Bug 5**.
+
+For the AArch64 display device itself (still entirely absent — `hal_display_flush()` is a no-op stub today), the plan is QEMU's `ramfb` device (fw_cfg-based, no PCI/virtio protocol needed) rather than virtio-gpu, to get first pixels on screen with a fraction of the driver code. Full design in `compile-kernel-plan.md` under **Bug 6**.
+
+### Status
+
+Design complete, not yet implemented. Explicitly out of scope for this pass: `Input.Mod`'s `msAdr`/`kbdAdr` (keyboard/mouse — same category of problem, separate hardware surface), `Kernel.Mod`'s SD-card SPI disk driver (`spiCtrl`/`spiData`/`timer`), and adding a full x86_64 14-module kernel CMake target.

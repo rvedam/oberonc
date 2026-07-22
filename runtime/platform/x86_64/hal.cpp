@@ -148,6 +148,11 @@ static constexpr uint32_t SHADOW_BASE = 0x0E7F00;
 static constexpr int      FB_W        = 1024;
 static constexpr int      FB_H        = 768;
 
+// Display.Mod now reads its framebuffer base via HAL.FramebufferBase()
+// instead of a hardcoded literal (see src/codegen.cpp's HAL pseudo-module).
+// x86_64 returns the same address it always used — byte-identical behavior.
+int64_t HAL_FramebufferBase() { return static_cast<int64_t>(SHADOW_BASE); }
+
 // Pointer to the 8bpp VBE linear framebuffer (null if VBE unavailable)
 static volatile uint8_t* vbe_lfb = nullptr;
 
