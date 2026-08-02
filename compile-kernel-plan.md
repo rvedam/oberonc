@@ -522,3 +522,34 @@ New `hal_display_flush()` (replacing today's no-op stub): blit `shadow_fb` (1bpp
 - `runtime/platform/aarch64/hal.cpp` — `shadow_fb`/`ramfb_pixels`, `HAL_FramebufferBase`, fw_cfg/ramfb init, real `hal_display_flush`
 - `runtime/platform/x86_64/hal.cpp` — `HAL_FramebufferBase` returning existing `SHADOW_BASE`
 - `CMakeLists.txt` — `-device ramfb`, `KERNEL_QEMU_DISPLAY` cache var, stale comment update
+
+---
+
+## Bug 7 — No x86_64 cross-compilation path from an Apple Silicon host — 🔧 PLANNED (2026-07-21)
+
+### Symptom
+
+After Bug 5 landed, tried to actually build a full 14-module x86_64 kernel (the `x86_64` `KERNEL_ARCH` block has never had a `project_oberon_kernel`-equivalent CMake target — only the trivial Hello-World `kernel` target). Confirmed empirically, in order:
+
+1. `build/` (the existing configured tree) is locked to `KERNEL_ARCH=apple-aarch64` — CMake's `KERNEL_ARCH` is a single-value cache variable per build directory, so the x86_64 `boot_bare`/`oberon_runtime_bare` targets don't even exist there. Had to `cmake -B build_x86_64 -DKERNEL_ARCH=x86_64` to get further.
+2. With a freshly configured `build_x86_64/`, `cmake --build build_x86_64 --target boot_bare` **fails outright**: the ARM64 assembler (this Mac's host default) chokes on `runtime/boot/x86_64/boot.S`'s x86 AT&T syntax — `movw %ax, %fs` → "invalid operand", `call hal_init` → "unrecognized instruction mnemonic", etc.
+3. Even past that, macOS's native `/usr/bin/ld` is Apple's `ld64`, which doesn't understand the GNU-ld-specific `-m elf_x86_64` emulation flag the `x86_64` CMake block passes, and can't emit ELF output regardless.
+4. `llc-14` (hardcoded in the `x86_64` block's `kernel` target) isn't installed on this Mac either — only `llc` from Homebrew LLVM 18.
+
+### Root cause
+
+`CMakeLists.txt`'s `x86_64` block (`if(KERNEL_ARCH STREQUAL "x86_64")`) was written assuming it runs **on** a native x86_64 Linux host — its own comment says so explicitly: `// Runtime library — host compiler is correct for x86_64`. It hands `boot.S`/`oberon_runtime_bare.cpp` straight to the plain host `cc`/`c++`/`ld`/assembler with zero cross-compilation flags. That assumption is false on this Apple Silicon dev machine, where the host toolchain defaults to arm64. This is unrelated to Bug 5/HAL — confirmed the HAL-indirection edits themselves are not the blocker: `Display.ll`/`Kernel.ll` (post-Bug-5) both assemble cleanly via `llc --march=x86-64` in isolation; the failure is entirely in the boot-stub/link toolchain selection.
+
+### Fix (design; not yet implemented)
+
+Mirror what the `apple-aarch64` block already does for ARM (Homebrew `clang --target=aarch64-none-elf` + `ld.lld` instead of assuming a native/cross-`gnu` host) with a new `apple-x86_64` `KERNEL_ARCH` variant:
+
+- Compile `boot.S` and `oberon_runtime_bare.cpp`/`platform/x86_64/hal.cpp` with Homebrew LLVM 18's `clang --target=x86_64-none-elf -ffreestanding` instead of the plain host `cc`/`c++`. **Confirmed working**: `clang --target=x86_64-none-elf -ffreestanding -c runtime/boot/x86_64/boot.S -o boot_test.o` produces a valid `ELF 64-bit LSB relocatable, x86-64` object on this host.
+- Link with `ld.lld` (already installed at `/opt/homebrew/opt/llvm@18/bin/ld.lld`, already used for `apple-aarch64`) instead of macOS's native `ld` — `ld.lld` understands `-m elf_x86_64` (it's LLVM's ELF-capable, GNU-ld-compatible linker), unlike Apple's `ld64`.
+- Use `llc` (not the hardcoded `llc-14`) for `--march=x86-64 --filetype=obj`, consistent with how the `apple-aarch64` block already resolves `APPLE_AARCH64_LLC`.
+- Add the analogous full 14-module `project_oberon_kernel`-equivalent target (mirroring aarch64's), in its own build tree (e.g. `build_x86_64/`, already proven to work as a separate CMake configuration from the aarch64 `build/`/`build_apple/` trees) — this is also the concrete answer to "how do aarch64 and x86_64 kernel sources/builds coexist in the repo": one shared `project-oberon/` source tree (per Bug 5's design — no forking), with **build tooling** (not source) forked per architecture via separate `KERNEL_ARCH` CMake blocks and separate build directories, exactly the pattern that already exists for `aarch64` (Linux cross-compile) vs. `apple-aarch64` (Mac native) today.
+- `build_kernel.sh` has the identical native-host assumption for its `x86_64` case (`LINKER="ld"`, hardcoded, no override) — should get the same `apple-x86_64`-style treatment, or at minimum a documented "only works on a native x86_64 Linux host, or after this fix" caveat.
+
+**Files to change:** `CMakeLists.txt` (new `apple-x86_64` block + `project_oberon_kernel` target for it), `build_kernel.sh` (x86_64 linker/assembler path).
+
+**Verification:** `cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64 && cmake --build build_x86_64 --target project_oberon_kernel` produces a valid ELF (`file` reports `ELF 64-bit LSB executable, x86-64`); boot under `qemu-system-x86_64` per `build_kernel.sh`'s existing `--run` instructions (`-vga std` for the Bochs VBE display path Bug 5/x86_64's `HAL_FramebufferBase` already supports unchanged).
