@@ -278,9 +278,17 @@ llvm::Value* CodeGen::genExpr(const Expr& e) {
                 auto* l = genStringOperand(*be->left);
                 auto* r = genStringOperand(*be->right);
                 if (l->getType()->isPointerTy() && r->getType()->isPointerTy()) {
+                    // Bound each side by its array length (unknown → unbounded)
+                    // so a char array without 0X is not read past its end.
+                    auto bound = [&](const Expr& x, const OberonTypePtr& t) -> llvm::Value* {
+                        llvm::Value* n = genLength(x, t);
+                        if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(n); c && c->isZero())
+                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), INT64_MAX);
+                        return n;
+                    };
                     auto* c = b_->CreateCall(getRuntimeHelper("__oberon_strcmp"),
-                                             {b_->CreateBitCast(l, ptrTy()),
-                                              b_->CreateBitCast(r, ptrTy())});
+                                             {b_->CreateBitCast(l, ptrTy()), bound(*be->left, lt),
+                                              b_->CreateBitCast(r, ptrTy()), bound(*be->right, rt)});
                     auto* z = llvm::ConstantInt::get(c->getType(), 0);
                     switch (be->op) {
                     case BinaryOp::Eq:  return b_->CreateICmpEQ (c, z);
@@ -652,8 +660,9 @@ llvm::Function* CodeGen::getRuntimeHelper(const std::string& name) {
     };
 
     if (name == "__oberon_strcmp") {
-        // int strcmp(a, b) over unsigned bytes, stopping at 0X
-        auto* fn = mk(i32, {p, p});
+        // int strcmp(a, alen, b, blen) over unsigned bytes, stopping at 0X;
+        // a position at or beyond an array's length reads as 0X.
+        auto* fn = mk(i32, {p, i64, p, i64});
         auto* entry = llvm::BasicBlock::Create(ctx_, "entry", fn);
         auto* loop  = llvm::BasicBlock::Create(ctx_, "loop", fn);
         auto* same  = llvm::BasicBlock::Create(ctx_, "same", fn);
@@ -664,8 +673,24 @@ llvm::Function* CodeGen::getRuntimeHelper(const std::string& name) {
         b.SetInsertPoint(loop);
         auto* i  = b.CreatePHI(i64, 2);
         i->addIncoming(llvm::ConstantInt::get(i64, 0), entry);
-        auto* ca = b.CreateZExt(b.CreateLoad(i8, b.CreateGEP(i8, fn->getArg(0), i)), i32);
-        auto* cb = b.CreateZExt(b.CreateLoad(i8, b.CreateGEP(i8, fn->getArg(1), i)), i32);
+        // ch(s, n) = i < n ? s[i] : 0X, branching so that the load is
+        // skipped when out of bounds.
+        auto charAt = [&](llvm::Value* str, llvm::Value* len, const char* nm) -> llvm::Value* {
+            auto* inBB   = llvm::BasicBlock::Create(ctx_, std::string(nm) + ".in", fn);
+            auto* joinBB = llvm::BasicBlock::Create(ctx_, std::string(nm) + ".join", fn);
+            auto* from   = b.GetInsertBlock();
+            b.CreateCondBr(b.CreateICmpULT(i, len), inBB, joinBB);
+            b.SetInsertPoint(inBB);
+            auto* c = b.CreateZExt(b.CreateLoad(i8, b.CreateGEP(i8, str, i)), i32);
+            b.CreateBr(joinBB);
+            b.SetInsertPoint(joinBB);
+            auto* phi = b.CreatePHI(i32, 2);
+            phi->addIncoming(llvm::ConstantInt::get(i32, 0), from);
+            phi->addIncoming(c, inBB);
+            return phi;
+        };
+        auto* ca = charAt(fn->getArg(0), fn->getArg(1), "a");
+        auto* cb = charAt(fn->getArg(2), fn->getArg(3), "b");
         b.CreateCondBr(b.CreateICmpEQ(ca, cb), same, diff);
         b.SetInsertPoint(same);
         i->addIncoming(b.CreateAdd(i, llvm::ConstantInt::get(i64, 1)), same);
@@ -990,7 +1015,7 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
             if (auto* de0 = dynamic_cast<const DesignatorExpr*>(args[0].get())) {
                 if (!de0->args) {
                     auto ty = typeOfDesig(*de0->desig);
-                    if (ty && ty->kind == TypeKind::Array)
+                    if (ty && (ty->kind == TypeKind::Array || ty->kind == TypeKind::String))
                         return coerce(genLength(*args[0], ty), it);
                 }
             }
@@ -1041,25 +1066,14 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
 
     // Type guard in expression position: v(T) or v.field(T) where T is a type.
     // The parser can't distinguish this from a call when ) is followed by END/ELSE/etc.
-    // Detect by checking whether the single "argument" resolves to a type, not a value.
-    if (de.args && de.args->size() == 1) {
-        auto* argDE = dynamic_cast<const DesignatorExpr*>(de.args->at(0).get());
-        if (argDE && !argDE->args && argDE->desig->selectors.empty()) {
-            std::string guardKey = argDE->desig->module.empty()
-                ? argDE->desig->ident
-                : argDE->desig->module + "_" + argDE->desig->ident;
-            auto guardIt = typeTable_.find(guardKey);
-            if (guardIt == typeTable_.end() && !argDE->desig->module.empty())
-                guardIt = typeTable_.find(argDE->desig->ident);
-            if (guardIt != typeTable_.end() &&
-                (guardIt->second->kind == TypeKind::Record ||
-                 guardIt->second->kind == TypeKind::Pointer)) {
-                OberonTypePtr guardType = guardIt->second;
-                auto [addr, baseTy] = genAddr(d);
-                llvm::Value* val = b_->CreateLoad(toLLVM(baseTy), addr, "tg_val");
-                return b_->CreateBitCast(val, toLLVM(guardType), "typeguard");
-            }
-        }
+    if (OberonTypePtr guardType = typeGuardOf(de)) {
+        auto [addr, baseTy] = genAddr(d);
+        // A record guard reads the variable with T's layout; a pointer guard
+        // reinterprets the pointer value.
+        if (guardType->kind == TypeKind::Record)
+            return b_->CreateLoad(toLLVM(guardType), addr, "typeguard");
+        llvm::Value* val = b_->CreateLoad(toLLVM(baseTy), addr, "tg_val");
+        return coerce(val, toLLVM(guardType));
     }
 
     // Indirect call through a procedure variable or record field
@@ -1108,6 +1122,26 @@ llvm::Value* CodeGen::genCallVal(const DesignatorExpr& de) {
     return b_->CreateCall(fn, args);
 }
 
+OberonTypePtr CodeGen::typeGuardOf(const DesignatorExpr& de) {
+    if (!de.args || de.args->size() != 1) return nullptr;
+    auto* argDE = dynamic_cast<const DesignatorExpr*>(de.args->at(0).get());
+    if (!argDE || argDE->args || !argDE->desig->selectors.empty()) return nullptr;
+    // A procedure of that name means this really is a call.
+    if (de.desig->module.empty() && llvmMod_->getFunction(modName_ + "_" + de.desig->ident))
+        return nullptr;
+    std::string key = argDE->desig->module.empty()
+        ? argDE->desig->ident
+        : argDE->desig->module + "_" + argDE->desig->ident;
+    auto it = typeTable_.find(key);
+    if (it == typeTable_.end() && !argDE->desig->module.empty())
+        it = typeTable_.find(argDE->desig->ident);
+    if (it == typeTable_.end()) return nullptr;
+    if (lookupSym(argDE->desig->ident) && argDE->desig->module.empty())
+        return nullptr;   // a variable shadows the type name: an argument
+    auto kind = it->second->kind;
+    return (kind == TypeKind::Record || kind == TypeKind::Pointer) ? it->second : nullptr;
+}
+
 // Element count (i64) of an array-valued actual parameter.
 llvm::Value* CodeGen::genLength(const Expr& arrayArg, OberonTypePtr argTy) {
     auto* i64 = llvm::Type::getInt64Ty(ctx_);
@@ -1116,15 +1150,27 @@ llvm::Value* CodeGen::genLength(const Expr& arrayArg, OberonTypePtr argTy) {
         if (content == std::string(1, '\0')) content.clear();
         return llvm::ConstantInt::get(i64, content.size() + 1);
     }
+    auto* dse = dynamic_cast<const DesignatorExpr*>(&arrayArg);
+    if (dse && !dse->args && dse->desig->selectors.empty()) {
+        // Named string constant: its length includes the terminating 0X.
+        bool imported = !dse->desig->module.empty() &&
+                        importedModules_.contains(dse->desig->module);
+        Symbol* sym = imported ? lookupSym(dse->desig->module + "_" + dse->desig->ident)
+                               : lookupSym(dse->desig->ident);
+        if (sym && sym->isConst && sym->type && sym->type->kind == TypeKind::String)
+            if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(sym->llvmVal))
+                return llvm::ConstantInt::get(
+                    i64, llvm::cast<llvm::ArrayType>(gv->getValueType())->getNumElements());
+    }
     if (argTy && argTy->kind == TypeKind::Array) {
         if (!argTy->isOpen) return llvm::ConstantInt::get(i64, argTy->length);
-        if (auto* dse = dynamic_cast<const DesignatorExpr*>(&arrayArg))
-            if (dse->desig->selectors.empty())
-                if (Symbol* lenSym = lookupSym("__len_" + dse->desig->ident))
-                    return b_->CreateLoad(i64, lenSym->llvmVal, "len");
+        // An open array is always a formal parameter (Oberon-07 has no
+        // pointers to open arrays), named directly: its length is hidden.
+        if (dse && dse->desig->selectors.empty())
+            if (Symbol* lenSym = lookupSym("__len_" + dse->desig->ident))
+                return b_->CreateLoad(i64, lenSym->llvmVal, "len");
     }
-    if (argTy && argTy->kind == TypeKind::String) return llvm::ConstantInt::get(i64, 0);
-    return llvm::ConstantInt::get(i64, 0);
+    return llvm::ConstantInt::get(i64, 0);   // unknown
 }
 
 // Builds the LLVM argument list for a call. `formals` describes the callee's
@@ -1149,12 +1195,14 @@ std::vector<llvm::Value*> CodeGen::genArgs(const std::vector<ExprPtr>* actuals,
                                      }());
         llvm::Value* v = nullptr;
         OberonTypePtr argOT;
+        OberonTypePtr guard = (byRef && dse) ? typeGuardOf(*dse) : nullptr;
         if (sle && (byRef || (expectedTy && expectedTy->isPointerTy()))) {
             v = genStringOperand(argExpr);            // string literal → char array
-        } else if (byRef && dse && !dse->args) {
+        } else if (byRef && dse && (!dse->args || guard)) {
+            // A variable, or a guarded one v(T): pass v's own address.
             auto [addr, aty] = genAddr(*dse->desig);
             v = addr;
-            argOT = aty;
+            argOT = guard ? guard : aty;
         } else {
             v = genExpr(argExpr);
             if (byRef && !v->getType()->isPointerTy()) {
@@ -1173,8 +1221,10 @@ std::vector<llvm::Value*> CodeGen::genArgs(const std::vector<ExprPtr>* actuals,
             args.push_back(genLength(argExpr, argOT));
             ++li;
         } else if (f && f->hidden == Hidden::Tag) {
-            llvm::Value* tag = (dse && !dse->args) ? genRecordTag(*dse->desig, argOT ? argOT : f->type)
-                                                   : tdRef(f->type);
+            // v and v(T) both keep v's dynamic type.
+            llvm::Value* tag = (dse && (!dse->args || guard))
+                                   ? genRecordTag(*dse->desig, argOT ? argOT : f->type)
+                                   : tdRef(f->type);
             args.push_back(tag);
             ++li;
         }
@@ -1501,6 +1551,9 @@ void CodeGen::genCase(const CaseStmt& s) {
     if (typeGuard) {
         // CASE v OF T1: … | T2: … END — test v's dynamic type against each
         // arm's type in order; within an arm, v has that arm's type.
+        // If no arm matches, nothing is executed (no trap): Project Oberon's
+        // frame handlers rely on this to ignore messages they don't handle,
+        // as with Wirth's compiler.
         auto* cde = dynamic_cast<const DesignatorExpr*>(s.expr.get());
         if (!cde || cde->args) error("type CASE requires a variable");
         const Designator& cd = *cde->desig;

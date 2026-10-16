@@ -84,11 +84,18 @@ static constexpr uint8_t SC_RELEASE = 0xF0, SC_SHIFT = 0x12, SC_CTRL = 0x14;
 static uint8_t  kbd_fifo[64];
 static unsigned kbd_head, kbd_tail;   // head == tail: empty
 
+// Longest sequence press() emits: modifier, key, F0 key, F0 modifier.
+static constexpr unsigned MAX_PRESS_CODES = 6;
+
+static unsigned kbd_free() {
+    return (kbd_head + sizeof(kbd_fifo) - kbd_tail - 1) % sizeof(kbd_fifo);
+}
+
+// Callers guarantee room (see poll_serial), so a press/release sequence is
+// never split — a lost release would leave Shift or Ctrl stuck down.
 static void kbd_push(uint8_t code) {
-    unsigned next = (kbd_tail + 1) % sizeof(kbd_fifo);
-    if (next == kbd_head) return;   // full: drop
     kbd_fifo[kbd_tail] = code;
-    kbd_tail = next;
+    kbd_tail = (kbd_tail + 1) % sizeof(kbd_fifo);
 }
 
 static void press(uint8_t modifier, uint8_t code) {
@@ -111,8 +118,14 @@ static void translate_char(uint8_t ch) {
             if (ktab[128 + sc] == 'A' + ch - 1) { press(SC_CTRL, static_cast<uint8_t>(sc)); return; }
 }
 
+// Reads characters only while a whole press fits; the rest stay queued in
+// the UART until Input.Mod has consumed some codes.
 static void poll_serial() {
-    for (int c; (c = hal_getc()) != -1;) translate_char(static_cast<uint8_t>(c));
+    while (kbd_free() >= MAX_PRESS_CODES) {
+        int c = hal_getc();
+        if (c == -1) break;
+        translate_char(static_cast<uint8_t>(c));
+    }
 }
 
 extern "C" int64_t HAL_Keyboard() {

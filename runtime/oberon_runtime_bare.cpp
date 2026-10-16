@@ -294,11 +294,13 @@ static size_t  heap_ptr = 0;
 
 // Kernel.Mod's own dummy free-list heap (Kernel.Init/Mark/Scan) is carved out
 // of the tail of this same array, with Oberon_NEW's bump limit capped below
-// it. Kernel.Mark treats every pointer >= heapOrg as having an 8-byte
-// Kernel-format header (tag + mark word); Oberon_NEW's objects are
-// header-less. Keeping the two regions disjoint by construction — rather
-// than by convention — means Kernel.Mark can never misinterpret a real
-// Oberon_NEW object as a Kernel-format block.
+// it. The two object formats differ: a Kernel block has a RISC5-style header
+// (32-bit tag + mark word, read at p-8/p-4 by Kernel.Mark and
+// Files.RestoreList), while the compiler puts a 64-bit type-descriptor
+// pointer at p-8 of every NEW object (see NEW in src/codegen_gen.cpp).
+// Keeping the regions disjoint by construction means Kernel's collector can
+// never misinterpret an Oberon_NEW object; the collector is also disabled
+// (Oberon.GC), since it would not know about Oberon_NEW objects at all.
 static constexpr size_t KERNEL_HEAP_RESERVE = 64 * 1024;
 static constexpr size_t OBERON_NEW_LIMIT    = sizeof(heap) - KERNEL_HEAP_RESERVE;
 

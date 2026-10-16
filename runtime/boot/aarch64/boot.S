@@ -41,6 +41,32 @@ _start:
     msr     vbar_el1, x0
     isb
 
+    /* Enable the MMU with an identity map (see _page_table below), so RAM is
+     * Normal cacheable memory: unaligned accesses are allowed and the caches
+     * work. With the MMU off every access is Device-nGnRnE.
+     *   MAIR:  attr0 = 0x00 Device-nGnRnE, attr1 = 0xFF Normal write-back
+     *   TCR:   T0SZ = 32 (4 GiB of VA, lookup starts at level 1), 4 KiB
+     *          granule, inner/outer write-back, inner shareable, TTBR1 walks
+     *          disabled (EPD1), 32-bit physical addresses (IPS = 0) */
+    mov     x0, #0xFF00
+    msr     mair_el1, x0
+    ldr     x0, =(32 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23))
+    msr     tcr_el1, x0
+    adrp    x0, _page_table
+    add     x0, x0, :lo12:_page_table
+    msr     ttbr0_el1, x0
+    isb
+    tlbi    vmalle1
+    dsb     sy
+    isb
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #(1 << 0)       /* M: MMU on */
+    orr     x0, x0, #(1 << 2)       /* C: data cache */
+    orr     x0, x0, #(1 << 12)      /* I: instruction cache */
+    bic     x0, x0, #(1 << 1)       /* A: no alignment checking */
+    msr     sctlr_el1, x0
+    isb
+
     /* Zero BSS */
     adrp    x1, _bss_start
     add     x1, x1, :lo12:_bss_start
@@ -98,6 +124,21 @@ _vectors:
     mrs     x3, far_el1
     bl      hal_exception
     b       .Lhalt
+
+/* -----------------------------------------------------------------------
+ * Level-1 translation table: four 1 GiB identity-mapped blocks.
+ *   0x00000000  Device, never executable (flash, UART, fw_cfg, PCIe MMIO)
+ *   0x40000000+ Normal write-back, inner shareable (RAM on QEMU virt)
+ * Block descriptor: bit 0 valid, bit 1 = 0 block, AttrIndx in [4:2],
+ * SH in [9:8], AF bit 10, PXN bit 53, UXN bit 54.
+ * ----------------------------------------------------------------------- */
+.section .data
+.balign 4096
+_page_table:
+    .quad 0x00000000 | (1 << 54) | (1 << 53) | (1 << 10) | (0 << 2) | 1
+    .quad 0x40000000 | (1 << 10) | (3 << 8) | (1 << 2) | 1
+    .quad 0x80000000 | (1 << 10) | (3 << 8) | (1 << 2) | 1
+    .quad 0xC0000000 | (1 << 10) | (3 << 8) | (1 << 2) | 1
 
 /* -----------------------------------------------------------------------
  * Stack (1 MiB; Project Oberon procedures keep 1 KiB sector buffers on the

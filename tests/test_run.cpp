@@ -26,8 +26,9 @@
 
 namespace {
 
-// Compiles and runs `src`; returns its stdout, or "COMPILE ERROR: …".
-std::string run(const std::string& src, bool int32) {
+// Compiles and runs `src` (feeding it `input` on stdin); returns its stdout,
+// or "COMPILE ERROR: …".
+std::string run(const std::string& src, bool int32, const std::string& input = "") {
     namespace fs = std::filesystem;
     static int counter = 0;
     fs::path dir = fs::temp_directory_path() / "oberonc_run_tests";
@@ -50,7 +51,8 @@ std::string run(const std::string& src, bool int32) {
     if (std::system(link.c_str()) != 0) return "LINK ERROR";
 
     std::string out;
-    FILE* p = popen(("\"" + stem + "\"").c_str(), "r");
+    std::ofstream(stem + ".in") << input;
+    FILE* p = popen(("\"" + stem + "\" < \"" + stem + ".in\"").c_str(), "r");
     if (!p) return "RUN ERROR";
     std::array<char, 256> buf{};
     while (size_t n = fread(buf.data(), 1, buf.size(), p)) out.append(buf.data(), n);
@@ -196,4 +198,70 @@ BEGIN s := 0; FOR i := 10 TO 0 BY -2 DO s := s + i END; Out.Int(s, 0);
 END T.)";
     for (bool w : {false, true})
         CHECK(run(src, w) == "30 1 2 3\n");
+}
+
+TEST_CASE("Run: In.Int/In.Real write only their (--int32-sized) variable", "[run][int32]") {
+    const char* src = R"(MODULE T; IMPORT In, Out;
+VAR a, b: INTEGER; x: REAL; c: INTEGER;
+BEGIN b := 7; c := 9; In.Int(a); In.Real(x);
+  Out.Int(a, 0); Out.Int(b, 2); Out.Int(FLOOR(x * 2.0), 2); Out.Int(c, 2); Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w, "-42 2.5\n") == "-42 7 5 9\n");
+}
+
+TEST_CASE("Run: LEN of a named string constant includes its 0X", "[run]") {
+    const char* src = R"(MODULE T; IMPORT Out;
+CONST msg = "hello";
+PROCEDURE Count(s: ARRAY OF CHAR): INTEGER;
+  VAR i: INTEGER;
+BEGIN i := 0; WHILE (i < LEN(s)) & (s[i] # 0X) DO INC(i) END; RETURN i
+END Count;
+BEGIN Out.Int(LEN(msg), 0); Out.Int(Count(msg), 2); Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "6 5\n");
+}
+
+TEST_CASE("Run: a type-guarded VAR record actual keeps its address and dynamic type", "[run][rtti]") {
+    const char* src = R"(MODULE T; IMPORT Out;
+TYPE Msg = RECORD END;
+  AMsg = RECORD (Msg) a: INTEGER END;
+  BMsg = RECORD (AMsg) b: INTEGER END;
+VAR bm: BMsg;
+PROCEDURE SetA(VAR M: AMsg);
+BEGIN M.a := 5; IF M IS BMsg THEN Out.String("B") END
+END SetA;
+PROCEDURE Handle(VAR M: Msg);
+BEGIN SetA(M(AMsg))
+END Handle;
+BEGIN bm.a := 0; Handle(bm); Out.Int(bm.a, 2); Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "B 5\n");
+}
+
+TEST_CASE("Run: string comparison stops at the array length", "[run]") {
+    const char* src = R"(MODULE T; IMPORT Out;
+TYPE Rec = RECORD a: ARRAY 4 OF CHAR; x: CHAR; b: ARRAY 4 OF CHAR; y: CHAR END;
+VAR r: Rec;
+BEGIN r.a[0] := "a"; r.a[1] := "b"; r.a[2] := "c"; r.a[3] := "d"; r.x := "X";
+  r.b[0] := "a"; r.b[1] := "b"; r.b[2] := "c"; r.b[3] := "d"; r.y := "Y";
+  IF r.a = r.b THEN Out.String("eq") ELSE Out.String("ne") END; Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "eq\n");
+}
+
+TEST_CASE("Run: a type CASE with no matching arm executes nothing", "[run][rtti]") {
+    const char* src = R"(MODULE T; IMPORT Out;
+TYPE Msg = RECORD END; AMsg = RECORD (Msg) END; BMsg = RECORD (Msg) END;
+VAR bm: BMsg;
+PROCEDURE Handle(VAR M: Msg);
+BEGIN CASE M OF AMsg: Out.String("A") END; Out.String("done")
+END Handle;
+BEGIN Handle(bm); Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "done\n");
 }

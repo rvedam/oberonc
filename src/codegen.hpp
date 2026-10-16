@@ -174,6 +174,9 @@ private:
     // Returns the resolved OberonType if expr is a bare type-name designator
     // (used by SYSTEM.SIZE and SYSTEM.VAL), otherwise nullptr.
     OberonTypePtr tryGetTypeArg(const Expr& e);
+    // If de has the call form v(T) with T a record or pointer type, it is a
+    // type guard (the parser cannot tell it from a call); returns T.
+    OberonTypePtr typeGuardOf(const DesignatorExpr& de);
 
     // ----------------------------------------------------------------
     // Helpers

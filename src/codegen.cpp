@@ -511,6 +511,29 @@ void CodeGen::genImports(const std::vector<ImportEntry>& imports) {
                 {llvm::PointerType::get(dbl, 0)}, false));
             decl("In_Char", llvm::FunctionType::get(voidTy,
                 {llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0)}, false));
+            // With --int32, INTEGER and REAL variables are narrower than the
+            // runtime's int64_t*/double* parameters: call through private
+            // wrappers that read into a full-width temporary and narrow it.
+            if (int32_) {
+                auto wrap = [&](const char* name, llvm::Type* wide, llvm::Type* narrow) {
+                    llvm::Function* rt = extFuncs_[name];
+                    auto* fn = llvm::Function::Create(
+                        llvm::FunctionType::get(voidTy, {llvm::PointerType::get(narrow, 0)}, false),
+                        llvm::Function::InternalLinkage, std::string(name) + "_narrow",
+                        llvmMod_.get());
+                    llvm::IRBuilder<> b(llvm::BasicBlock::Create(ctx_, "entry", fn));
+                    auto* tmp = b.CreateAlloca(wide);
+                    b.CreateStore(llvm::Constant::getNullValue(wide), tmp);
+                    b.CreateCall(rt, {tmp});
+                    llvm::Value* v = b.CreateLoad(wide, tmp);
+                    v = wide->isIntegerTy() ? b.CreateTrunc(v, narrow) : b.CreateFPTrunc(v, narrow);
+                    b.CreateStore(v, fn->getArg(0));
+                    b.CreateRetVoid();
+                    extFuncs_[name] = fn;
+                };
+                wrap("In_Int",  i64, intTy());
+                wrap("In_Real", dbl, realTy());
+            }
             // In_* take their single argument by reference (VAR).
             for (auto* n : {"In_Int", "In_Real", "In_Char"}) {
                 Formal f; f.byRef = true;

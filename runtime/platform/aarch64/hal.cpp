@@ -150,6 +150,12 @@ static bool streq(const char* a, const char* b) {
 alignas(4096) static uint32_t ramfb_pixels[FB_H][FB_W];   // XRGB8888, 3 MiB BSS
 static bool ramfb_ok = false;
 
+// Change detection and expansion for hal_display_flush: the shadow words
+// last drawn, and each byte's 8 pixels (bit k = pixel k).
+static uint32_t drawn[FB_H][FB_W / 32];
+static bool     drawn_valid = false;
+static uint32_t byte_pixels[256][8];
+
 static void ramfb_init() {
     // The file directory: a big-endian entry count followed by the entries.
     static struct { uint32_t count; FwCfgFile files[64]; } dir;
@@ -169,6 +175,9 @@ static void ramfb_init() {
         cfg.height = be32(FB_H);
         cfg.stride = be32(FB_W * 4);
         ramfb_ok = fw_cfg_dma(be16(dir.files[i].select), DMA_CTL_WRITE, &cfg, sizeof cfg);
+        for (int b = 0; b < 256; ++b)
+            for (int bit = 0; bit < 8; ++bit)
+                byte_pixels[b][bit] = (b >> bit) & 1 ? 0x00FFFFFFu : 0x00000000u;
         hal_puts(ramfb_ok ? "[ramfb: 1024x768]\n" : "[ramfb: configuration failed]\n");
         return;
     }
@@ -177,18 +186,24 @@ static void ramfb_init() {
 
 // Project Oberon's frame buffer has y = 0 at the bottom (the RISC5 video
 // controller scans it in reverse); bit k of each 32-bit word is pixel x+k.
+// Only 32-pixel words that changed since the last flush are redrawn.
 void hal_display_flush() {
     if (!ramfb_ok) return;
-    constexpr uint32_t WHITE = 0x00FFFFFF, BLACK = 0x00000000;
-    for (int line = 0; line < FB_H; ++line) {
-        const auto* src = reinterpret_cast<const uint32_t*>(shadow_fb[FB_H - 1 - line]);
-        uint32_t* dst = ramfb_pixels[line];
+    for (int row = 0; row < FB_H; ++row) {
+        const auto* src = reinterpret_cast<const uint32_t*>(shadow_fb[row]);
+        uint32_t* line = ramfb_pixels[FB_H - 1 - row];
         for (int w = 0; w < FB_W / 32; ++w) {
             uint32_t word = src[w];
-            for (int bit = 0; bit < 32; ++bit)
-                *dst++ = (word >> bit) & 1 ? WHITE : BLACK;
+            if (drawn_valid && word == drawn[row][w]) continue;
+            drawn[row][w] = word;
+            uint32_t* dst = line + w * 32;
+            for (int byte = 0; byte < 4; ++byte, dst += 8) {
+                const uint32_t* px = byte_pixels[(word >> (8 * byte)) & 0xFF];
+                for (int k = 0; k < 8; ++k) dst[k] = px[k];
+            }
         }
     }
+    drawn_valid = true;
 }
 
 // ---------------------------------------------------------------------------

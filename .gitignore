@@ -4,6 +4,9 @@ build/
 *.o
 *.a
 *.s
+# ...but not hand-written assembly sources (*.s also matches *.S on
+# case-insensitive file systems such as macOS)
+!runtime/**/*.S
 *.ll
 *.swp
 tests/Hello

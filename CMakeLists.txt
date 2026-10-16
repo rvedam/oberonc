@@ -250,11 +250,9 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     # -nostdinc++ prevents Homebrew clang from picking up macOS SDK libc++
     # headers (which require OS thread APIs) when targeting bare-metal ELF.
     # -DOBERON_BUILD_ON_APPLE switches compat_stdint.hpp to C-style headers.
-    # -mstrict-align: the kernel runs with the MMU off, where all memory is
-    # Device memory and unaligned accesses fault.
     set(APPLE_BARE_CXXFLAGS
         --target=${APPLE_AARCH64_TRIPLE}
-        -std=c++20 -ffreestanding -nostdinc++ -O2 -mstrict-align
+        -std=c++20 -ffreestanding -nostdinc++ -O2
         -Wall -Wextra -Wpedantic
         -DOBERON_BUILD_ON_APPLE
         -I${CMAKE_SOURCE_DIR}/runtime)
@@ -397,8 +395,7 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     set(PO_OBJ_FILES "")
     # Every module's IR depends on the interfaces of the modules it imports.
     file(GLOB PO_SOURCES "${PO_DIR}/*.Mod")
-    set(PO_LLC_FLAGS --march=aarch64 -mtriple=${APPLE_AARCH64_TRIPLE}
-                     -mattr=+strict-align --filetype=obj)
+    set(PO_LLC_FLAGS --march=aarch64 -mtriple=${APPLE_AARCH64_TRIPLE} --filetype=obj)
     set(KERNEL_QEMU_DISPLAY "none" CACHE STRING
         "QEMU -display backend for run_project_oberon (none, cocoa, ...)")
 
