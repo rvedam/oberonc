@@ -41,6 +41,9 @@ public:
         modulePaths_.assign(paths.begin(), paths.end());
     }
     void setModuleInitOnly(bool v) { moduleInitOnly_ = v; }
+    // Project Oberon ABI: INTEGER and SET are 32-bit (storage and arithmetic),
+    // integer literals wrap to 32 bits, LSL/ASR/ROR use RISC5 semantics.
+    void setInt32(bool v) { int32_ = v; }
 
     // Names of user modules that were successfully loaded (alias → modName)
     [[nodiscard]] const std::vector<std::pair<std::string,std::string>>& loadedUserModules() const {
@@ -67,6 +70,7 @@ private:
     std::vector<std::string>                modulePaths_;
     std::vector<std::pair<std::string,std::string>> loadedUserModules_; // (alias, modName)
     bool                                    moduleInitOnly_ = false; // generate ModName_init instead of oberon_main
+    bool                                    int32_ = false;          // 32-bit INTEGER/SET (see setInt32)
     std::string                             sysAlias_;  // alias used to import SYSTEM (usually "SYSTEM")
 
     // ---- Symbol table ----
@@ -75,6 +79,7 @@ private:
         llvm::Value*  llvmVal  = nullptr;
         bool          isConst  = false;
         bool          isVar    = false; // VAR param – llvmVal is already a ptr
+        llvm::Value*  tagVal   = nullptr; // VAR record param: hidden dynamic type tag
     };
     using Scope = std::unordered_map<std::string, Symbol>;
     std::vector<Scope> scopes_;
@@ -85,10 +90,17 @@ private:
     // ---- External / imported functions ----
     std::unordered_map<std::string, llvm::Function*> extFuncs_;
 
-    // ---- Open-array formal tracking ----
-    // Maps each LLVM function to a bool vector: true at index i means formal i
-    // is an open array and has a hidden i64 length argument following it.
-    std::unordered_map<llvm::Function*, std::vector<bool>> openArrayFormals_;
+    // ---- Formal parameter tracking ----
+    // Per Oberon formal (not per LLVM parameter): whether the actual is passed
+    // by address, and which hidden argument (if any) follows it.
+    enum class Hidden : uint8_t { None, Len, Tag };
+    struct Formal {
+        OberonTypePtr type;
+        bool          byRef  = false; // VAR, array or record: pass address
+        Hidden        hidden = Hidden::None; // Len: open-array i64 length; Tag: VAR record type tag
+    };
+    std::unordered_map<llvm::Function*, std::vector<Formal>> formals_;
+    std::unordered_map<llvm::Function*, OberonTypePtr>       procRetTypes_;
 
     // ---- Per-function state ----
     llvm::Function*   curFunc_    = nullptr;
@@ -102,6 +114,15 @@ private:
     OberonTypePtr resolveTypeName(const std::string& mod, const std::string& name);
     OberonTypePtr resolveType(const TypeExpr& te);
     llvm::Type*         toLLVM(OberonTypePtr t);
+    llvm::IntegerType*  intTy();   // LLVM type of INTEGER/SET values (i32 or i64)
+    llvm::ConstantInt*  intConst(int64_t v);   // INTEGER constant, wrapped to intTy()
+    llvm::Type*         realTy();  // LLVM type of REAL (double, or float with --int32)
+    llvm::PointerType*  ptrTy();   // generic data pointer (i8*)
+    std::vector<Formal> makeFormals(const std::vector<ProcParam>& params);
+    // Appends LLVM parameter types (including hidden ones) for the formals.
+    void                formalLLVMTypes(const std::vector<Formal>& fs,
+                                        std::vector<llvm::Type*>& out);
+    std::vector<ProcParam> paramsOf(const FormalParameters* fp);
     llvm::FunctionType* toLLVMFunctionType(OberonTypePtr t); // unwrapped fn type for indirect calls
 
     // Two-pass type declaration processing
@@ -139,7 +160,14 @@ private:
     struct AddrResult { llvm::Value* addr; OberonTypePtr type; };
 
     llvm::Value* genExpr      (const Expr&       e);
-    AddrResult   genAddr      (const Designator& d);
+    AddrResult   genAddr      (const Designator& d, size_t maxSelectors = SIZE_MAX);
+    std::vector<llvm::Value*> genArgs(const std::vector<ExprPtr>* actuals,
+                                      llvm::FunctionType* fty,
+                                      const std::vector<Formal>* formals);
+    void         genArrayOrRecordCopy(llvm::Value* dst, OberonTypePtr dstTy, const Expr& src,
+                                      llvm::Value* dstLen = nullptr);
+    llvm::Value* genStringOperand(const Expr& e);
+    llvm::Value* genLength(const Expr& arrayArg, OberonTypePtr argTy); // i64 element count
     llvm::Value* genCallVal   (const DesignatorExpr& de);   // call as expression
     llvm::Value* genSysCallVal(const DesignatorExpr& de);   // SYSTEM function intrinsics
 
@@ -158,6 +186,20 @@ private:
     int64_t               evalConstInt(const Expr& e);  // evaluate compile-time integer
 
     OberonTypePtr typeOfDesig(const Designator& d);
+    OberonTypePtr exprType(const Expr& e);   // best-effort static type, nullptr if unknown
+    bool          isSetExpr(const Expr& e);
+    static bool   isCharArray(const OberonTypePtr& t);
+
+    // ---- Run-time type information (record type descriptors) ----
+    // A descriptor is a global { i8* base } named "<Module>_<Type>__td".
+    // Heap records carry their descriptor in an 8-byte header before the
+    // object; VAR record parameters receive it as a hidden argument.
+    llvm::StructType* tdStructTy();
+    llvm::Value*      tdRef(const OberonTypePtr& recTy);   // i8*, null if no descriptor
+    void              emitTypeDescriptor(const OberonTypePtr& recTy);
+    llvm::Value*      genRecordTag(const Designator& d, const OberonTypePtr& staticTy);
+    llvm::Value*      genIsTest(const Designator& d, const OberonTypePtr& target);
+    llvm::Function*   getRuntimeHelper(const std::string& name); // module-private helpers
 
     void          pushScope() { scopes_.emplace_back(); }
     void          popScope () { scopes_.pop_back(); }

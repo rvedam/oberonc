@@ -42,7 +42,7 @@ static void link(const std::vector<std::string>& objFiles, const std::string& ex
 }
 
 // Compile a single Oberon source file to a native object, returning the obj path
-static std::string compileToObject(const std::string& modSrcPath) {
+static std::string compileToObject(const std::string& modSrcPath, bool int32) {
     std::string src = [&] {
         std::ifstream f(modSrcPath);
         if (!f) throw std::runtime_error("cannot open '" + modSrcPath + "'");
@@ -61,6 +61,7 @@ static std::string compileToObject(const std::string& modSrcPath) {
     if (dir.empty()) dir = ".";
     cg.setModulePaths(std::array<std::string, 1>{dir});
     cg.setModuleInitOnly(true); // don't emit oberon_main for imported modules
+    cg.setInt32(int32);
     cg.generate(mod);
 
     std::string objPath = stem + ".o";
@@ -70,16 +71,18 @@ static std::string compileToObject(const std::string& modSrcPath) {
 
 static void usage() {
     std::cerr <<
-        "usage: oberonc [--emit-llvm] [--init-only] [--module-path <dir>] [-o output] <file.Mod>\n"
+        "usage: oberonc [--emit-llvm] [--init-only] [--int32] [--module-path <dir>] [-o output] <file.Mod>\n"
         "  --emit-llvm        emit LLVM IR (.ll) instead of linking an executable\n"
         "  --init-only        emit ModuleName_init() instead of oberon_main()\n"
         "                     (use when compiling library/dependency modules)\n"
+        "  --int32            32-bit INTEGER/SET (Project Oberon / RISC5 semantics)\n"
         "  --module-path dir  add a directory to the module search path (repeatable)\n"
         "  -o output          output file path (executable, or .ll with --emit-llvm)\n";
 }
 
 int main(int argc, char* argv[]) {
     bool emitLLVM   = false;
+    bool int32      = false;
     bool initOnly   = false;
     std::string outputArg;
     std::string srcPath;
@@ -89,6 +92,8 @@ int main(int argc, char* argv[]) {
         std::string_view a = argv[i];
         if (a == "--emit-llvm") {
             emitLLVM = true;
+        } else if (a == "--int32") {
+            int32 = true;
         } else if (a == "--init-only") {
             initOnly = true;
         } else if (a == "--module-path") {
@@ -125,6 +130,7 @@ int main(int argc, char* argv[]) {
         modulePaths.insert(modulePaths.end(), extraModulePaths.begin(), extraModulePaths.end());
         cg.setModulePaths(modulePaths);
         if (initOnly) cg.setModuleInitOnly(true);
+        cg.setInt32(int32);
         cg.generate(mod);
 
         if (emitLLVM) {
@@ -144,7 +150,7 @@ int main(int argc, char* argv[]) {
                 // Find the source path (same logic as loadModuleInterface)
                 std::string modSrcPath = srcDir + "/" + modName + ".Mod";
                 if (std::filesystem::exists(modSrcPath)) {
-                    std::string modObj = compileToObject(modSrcPath);
+                    std::string modObj = compileToObject(modSrcPath, int32);
                     allObjs.push_back(modObj);
                     tempObjs.push_back(modObj);
                 }

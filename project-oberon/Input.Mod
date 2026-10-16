@@ -1,7 +1,8 @@
 MODULE Input; (*NW 5.10.86 / 15.11.90 Ceres-2; PDR 21.4.12 / NW 15.5.2013 Ceres-4*)
-  IMPORT SYSTEM;
+  IMPORT SYSTEM, HAL;
 
-  CONST msAdr = -40; kbdAdr = -36;
+  (*oberonc: the RISC5 mouse/keyboard registers (msAdr = -40, kbdAdr = -36) are
+    read through the HAL, which returns the same word/scan-code formats*)
   VAR kbdCode: BYTE; (*last keyboard code read*)
     Recd, Up, Shift, Ctrl, Ext: BOOLEAN;
     KTabAdr: INTEGER;  (*keyboard code translation table*)
@@ -13,8 +14,8 @@ MODULE Input; (*NW 5.10.86 / 15.11.90 Ceres-2; PDR 21.4.12 / NW 15.5.2013 Ceres-
   
   PROCEDURE Peek();
   BEGIN
-    IF SYSTEM.BIT(msAdr, 28) THEN
-      SYSTEM.GET(kbdAdr, kbdCode);
+    IF ODD(HAL.Mouse() DIV 10000000H) THEN (*bit 28: keyboard data ready*)
+      kbdCode := HAL.Keyboard();
       IF kbdCode = 0F0H THEN Up := TRUE
       ELSIF kbdCode = 0E0H THEN Ext := TRUE
       ELSE
@@ -44,7 +45,7 @@ MODULE Input; (*NW 5.10.86 / 15.11.90 Ceres-2; PDR 21.4.12 / NW 15.5.2013 Ceres-
 
   PROCEDURE Mouse*(VAR keys: SET; VAR x, y: INTEGER);
     VAR w: INTEGER;
-  BEGIN SYSTEM.GET(msAdr, w);
+  BEGIN w := HAL.Mouse();
     keys := SYSTEM.VAL(SET, w DIV 1000000H MOD 8);
     x := w MOD 400H; y := (w DIV 1000H) MOD 400H;
     IF y >= MH THEN y := MH-1 END

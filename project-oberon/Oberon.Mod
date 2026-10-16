@@ -307,7 +307,9 @@ MODULE Oberon; (*JG 6.9.90 / 23.9.93 / 13.8.94 / NW 14.4.2013 / 22.12.2015*)
   PROCEDURE GC;
     VAR mod: Modules.Module;
   BEGIN
-    IF (ActCnt <= 0) OR (Kernel.allocated >= Kernel.heapLim - Kernel.heapOrg - 10000H) THEN
+    (*oberonc: heap objects come from the runtime allocator (Oberon_NEW), not
+      Kernel.New, so Kernel's mark/scan collector must not run*)
+    IF FALSE & ((ActCnt <= 0) OR (Kernel.allocated >= Kernel.heapLim - Kernel.heapOrg - 10000H)) THEN
       mod := Modules.root; LED(21H);
       WHILE mod # NIL DO
         IF mod.name[0] # 0X THEN Kernel.Mark(mod.ptr) END ;
@@ -407,5 +409,6 @@ BEGIN User[0] := 0X;
   CurFnt := Fonts.Default; CurCol := Display.white; CurOff := 0;
 
   ActCnt := 0; CurTask := NewTask(GC, 1000); Install(CurTask);
-  Modules.Load("System", Mod); Mod := NIL; Loop
+  (*oberonc: System is linked statically and initialised after Oberon; its
+    module body enters Loop. Original: Modules.Load("System", Mod); Mod := NIL; Loop*)
 END Oberon.

@@ -553,3 +553,25 @@ Mirror what the `apple-aarch64` block already does for ARM (Homebrew `clang --ta
 **Files to change:** `CMakeLists.txt` (new `apple-x86_64` block + `project_oberon_kernel` target for it), `build_kernel.sh` (x86_64 linker/assembler path).
 
 **Verification:** `cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64 && cmake --build build_x86_64 --target project_oberon_kernel` produces a valid ELF (`file` reports `ELF 64-bit LSB executable, x86-64`); boot under `qemu-system-x86_64` per `build_kernel.sh`'s existing `--run` instructions (`-vga std` for the Bochs VBE display path Bug 5/x86_64's `HAL_FramebufferBase` already supports unchanged).
+
+---
+
+## Backlog: Design a persistent file system / storage layer — 📋 TODO (added 2026-10-15)
+
+### Current state (interim solution)
+
+The kernel's "disk" is a RAM disk: `tools/mkpodisk.py` builds a Project Oberon file-system image (root `DirPage` at sector 1, currently `Oberon10.Scn.Fnt` and `System.Tool`), `runtime/po_disk_image.S` embeds it into the kernel ELF's `.data` section via `.incbin`, and `runtime/po_devices.cpp` serves `HAL_ReadSector`/`HAL_WriteSector` (called from `Kernel.GetSector`/`PutSector`) directly from that memory.
+
+Limitations:
+- **Nothing persists** — writes (`Files.Register`, `Edit.Store`, …) are lost on reboot.
+- **Fixed size** (1024 sectors = 1 MiB); out-of-range sectors are rejected with a serial warning, but `Kernel.AllocSector` doesn't know the limit.
+- **Contents fixed at build time** — changing a file means rebuilding/relinking the kernel.
+- `mkpodisk.py` only supports a single root directory page (≤ 24 files) and no extension sectors (files ≤ 64 sectors).
+
+### To design
+
+- **Backing store**: options considered so far — QEMU `-device loader` at a fixed RAM address, virtio-blk (virtio-mmio on aarch64 `virt`, PCI on x86_64; pairs naturally with a virtio-tablet mouse driver), pflash, or a host-file image. Must work on both aarch64 and x86_64 behind the same `HAL_ReadSector`/`HAL_WriteSector` interface.
+- **On-disk format**: keep Project Oberon's FileDir/Files format (binary-compatible with real PO disk images, e.g. the emulator's `RISC.img`, given `--int32`) vs. something new.
+- **Disk geometry**: sector-map size (`Kernel.mapsize`), reserved sectors, how the size limit is communicated to `Kernel.InitSecMap`/`AllocSector`.
+- **Tooling**: a host-side tool to create images and add/extract files (B-tree with multiple pages, extension sectors), replacing `mkpodisk.py`'s limits.
+- **Module loading**: whether the file system should also hold compiled modules so `Modules.Load` (currently disabled; everything is statically linked) can work again.

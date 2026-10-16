@@ -113,12 +113,15 @@ target_link_libraries(oberonc_tests PRIVATE oberonc_lib Catch2::Catch2WithMain)
 # ---- Test executable (codegen — requires LLVM) ----------------------------
 add_executable(oberonc_codegen_tests
     tests/test_codegen.cpp
+    tests/test_run.cpp
 )
 target_link_libraries(oberonc_codegen_tests PRIVATE oberonc_codegen Catch2::Catch2WithMain)
+add_dependencies(oberonc_codegen_tests oberon_runtime)
 # Inject the absolute path to the tests/ directory so test fixtures are findable
-# regardless of working directory.
+# regardless of working directory; the run tests link against the runtime.
 target_compile_definitions(oberonc_codegen_tests PRIVATE
-    TEST_MODULE_DIR="${CMAKE_SOURCE_DIR}/tests")
+    TEST_MODULE_DIR="${CMAKE_SOURCE_DIR}/tests"
+    OBERON_RUNTIME_LIB="$<TARGET_FILE:oberon_runtime>")
 
 include(CTest)
 include(Catch)
@@ -247,9 +250,12 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     # -nostdinc++ prevents Homebrew clang from picking up macOS SDK libc++
     # headers (which require OS thread APIs) when targeting bare-metal ELF.
     # -DOBERON_BUILD_ON_APPLE switches compat_stdint.hpp to C-style headers.
+    # -mstrict-align: the kernel runs with the MMU off, where all memory is
+    # Device memory and unaligned accesses fault.
     set(APPLE_BARE_CXXFLAGS
         --target=${APPLE_AARCH64_TRIPLE}
-        -std=c++20 -ffreestanding -nostdinc++ -O2
+        -std=c++20 -ffreestanding -nostdinc++ -O2 -mstrict-align
+        -Wall -Wextra -Wpedantic
         -DOBERON_BUILD_ON_APPLE
         -I${CMAKE_SOURCE_DIR}/runtime)
 
@@ -260,6 +266,7 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
                 -o ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
         DEPENDS ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
                 ${CMAKE_SOURCE_DIR}/runtime/compat_stdint.hpp
+                ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
         COMMENT "Compiling AArch64 bare runtime (Apple LLVM 18)")
 
     add_custom_command(
@@ -269,16 +276,57 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
                 -o ${CMAKE_BINARY_DIR}/hal.o
         DEPENDS ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
                 ${CMAKE_SOURCE_DIR}/runtime/compat_stdint.hpp
+                ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
         COMMENT "Compiling AArch64 HAL (Apple LLVM 18)")
+
+    # Project Oberon devices (RAM disk, keyboard) and the file-system image.
+    # Archive members are only linked when referenced, so the Hello-World
+    # kernel does not pull in the disk image.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(PO_DISK_IMAGE "${CMAKE_BINARY_DIR}/po_disk.img")
+    add_custom_command(
+        OUTPUT ${PO_DISK_IMAGE}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mkpodisk.py
+                ${PO_DISK_IMAGE} 1024
+                Oberon10.Scn.Fnt=${CMAKE_SOURCE_DIR}/project-oberon/Oberon10.Scn.Fnt
+                System.Tool=${CMAKE_SOURCE_DIR}/project-oberon/System.Tool.txt
+        DEPENDS ${CMAKE_SOURCE_DIR}/tools/mkpodisk.py
+                ${CMAKE_SOURCE_DIR}/project-oberon/Oberon10.Scn.Fnt
+                ${CMAKE_SOURCE_DIR}/project-oberon/System.Tool.txt
+        COMMENT "Building Project Oberon RAM-disk image")
+
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/po_devices.o
+        COMMAND ${APPLE_AARCH64_CXX} ${APPLE_BARE_CXXFLAGS}
+                -c ${CMAKE_SOURCE_DIR}/runtime/po_devices.cpp
+                -o ${CMAKE_BINARY_DIR}/po_devices.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/po_devices.cpp
+                ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
+        COMMENT "Compiling Project Oberon devices (Apple LLVM 18)")
+
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/po_disk_image.o
+        COMMAND ${APPLE_AARCH64_CC} --target=${APPLE_AARCH64_TRIPLE}
+                "-DPO_DISK_IMAGE=\"${PO_DISK_IMAGE}\""
+                -c ${CMAKE_SOURCE_DIR}/runtime/po_disk_image.S
+                -o ${CMAKE_BINARY_DIR}/po_disk_image.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/po_disk_image.S ${PO_DISK_IMAGE}
+        COMMENT "Embedding Project Oberon RAM-disk image"
+        VERBATIM)
 
     add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
         COMMAND ${APPLE_AARCH64_AR} rcs
                 ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
                 ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
                 ${CMAKE_BINARY_DIR}/hal.o
+                ${CMAKE_BINARY_DIR}/po_devices.o
+                ${CMAKE_BINARY_DIR}/po_disk_image.o
         DEPENDS ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
                 ${CMAKE_BINARY_DIR}/hal.o
+                ${CMAKE_BINARY_DIR}/po_devices.o
+                ${CMAKE_BINARY_DIR}/po_disk_image.o
         COMMENT "Archiving AArch64 runtime library")
 
     add_custom_command(
@@ -329,11 +377,13 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     #   - System.Mod is the top-level: it emits oberon_main(), which calls
     #     every imported module's _init() in dependency order, then runs
     #     System's own BEGIN…END body.
-    # Boot sequence: _start → hal_init → oberon_main → hal_halt
+    #   - All modules are compiled with --int32 (Project Oberon's 32-bit
+    #     INTEGER/SET/REAL), which their record layouts and disk format need.
+    # Boot sequence: _start → hal_init → oberon_main → (System body enters
+    # Oberon.Loop, which never returns).
     #
-    # No extra runtime stubs are needed: Kernel/Files/Display etc. implement
-    # their own hardware access via SYSTEM.PUT/GET inline in the Oberon IR.
-    # The only external symbols needed are Oberon_NEW and Oberon_Trap, both
+    # External symbols: Oberon_NEW, Oberon_Trap and the HAL_* functions
+    # (framebuffer, heap bounds, timer, mouse/keyboard, RAM-disk sectors), all
     # provided by liboberon_runtime_bare.a.
 
     set(PO_DIR   "${CMAKE_SOURCE_DIR}/project-oberon")
@@ -345,23 +395,28 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
         Texts Oberon MenuViewers TextFrames Edit)
 
     set(PO_OBJ_FILES "")
+    # Every module's IR depends on the interfaces of the modules it imports.
+    file(GLOB PO_SOURCES "${PO_DIR}/*.Mod")
+    set(PO_LLC_FLAGS --march=aarch64 -mtriple=${APPLE_AARCH64_TRIPLE}
+                     -mattr=+strict-align --filetype=obj)
+    set(KERNEL_QEMU_DISPLAY "none" CACHE STRING
+        "QEMU -display backend for run_project_oberon (none, cocoa, ...)")
 
     foreach(mod IN LISTS PO_DEPS)
         set(ll_out  "${PO_BUILD}/${mod}.ll")
         set(obj_out "${PO_BUILD}/${mod}.o")
         add_custom_command(
             OUTPUT  "${ll_out}"
-            COMMAND $<TARGET_FILE:oberonc> --emit-llvm --init-only
+            COMMAND $<TARGET_FILE:oberonc> --emit-llvm --init-only --int32
                     --module-path "${PO_DIR}"
                     -o "${ll_out}"
                     "${PO_DIR}/${mod}.Mod"
-            DEPENDS oberonc "${PO_DIR}/${mod}.Mod"
+            DEPENDS oberonc ${PO_SOURCES}
             COMMENT "PO: ${mod}.Mod (init-only) → ${mod}.ll"
             VERBATIM)
         add_custom_command(
             OUTPUT  "${obj_out}"
-            COMMAND "${APPLE_AARCH64_LLC}" --march=aarch64
-                    -mtriple=${APPLE_AARCH64_TRIPLE} --filetype=obj
+            COMMAND "${APPLE_AARCH64_LLC}" ${PO_LLC_FLAGS}
                     "${ll_out}" -o "${obj_out}"
             DEPENDS "${ll_out}"
             COMMENT "PO: ${mod}.ll → ${mod}.o"
@@ -374,17 +429,16 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     set(PO_SYSTEM_OBJ "${PO_BUILD}/System.o")
     add_custom_command(
         OUTPUT  "${PO_SYSTEM_LL}"
-        COMMAND $<TARGET_FILE:oberonc> --emit-llvm
+        COMMAND $<TARGET_FILE:oberonc> --emit-llvm --int32
                 --module-path "${PO_DIR}"
                 -o "${PO_SYSTEM_LL}"
                 "${PO_DIR}/System.Mod"
-        DEPENDS oberonc "${PO_DIR}/System.Mod"
+        DEPENDS oberonc ${PO_SOURCES}
         COMMENT "PO: System.Mod (top-level) → System.ll"
         VERBATIM)
     add_custom_command(
         OUTPUT  "${PO_SYSTEM_OBJ}"
-        COMMAND "${APPLE_AARCH64_LLC}" --march=aarch64
-                -mtriple=${APPLE_AARCH64_TRIPLE} --filetype=obj
+        COMMAND "${APPLE_AARCH64_LLC}" ${PO_LLC_FLAGS}
                 "${PO_SYSTEM_LL}" -o "${PO_SYSTEM_OBJ}"
         DEPENDS "${PO_SYSTEM_LL}"
         COMMENT "PO: System.ll → System.o"
@@ -408,9 +462,9 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     if(QEMU_AARCH64)
         add_custom_target(run_project_oberon
             COMMAND "${QEMU_AARCH64}"
-                    -M virt -cpu cortex-a57
+                    -M virt -cpu cortex-a57 -device ramfb
                     -kernel "${CMAKE_BINARY_DIR}/project_oberon_aarch64.elf"
-                    -serial stdio -display none -no-reboot
+                    -serial stdio -display ${KERNEL_QEMU_DISPLAY} -no-reboot
             DEPENDS project_oberon_kernel
             COMMENT "Running Project Oberon kernel under QEMU virt"
             USES_TERMINAL)

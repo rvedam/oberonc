@@ -220,23 +220,22 @@ MODULE Kernel;  (*NW/PR  11.4.86 / 27.12.95 / 4.2.2014*)
     INCL(sectorMap[s DIV 32], s MOD 32); INC(NofSectors); sec := s * 29
   END AllocSector;
 
+  (*oberonc: sectors come from the HAL (a RAM disk) instead of the RISC5 SPI
+    SD-card interface; ReadSD/WriteSD above are kept but unused*)
   PROCEDURE GetSector*(src: INTEGER; VAR dst: Sector);
   BEGIN src := src DIV 29; ASSERT(SYSTEM.H(0) = 0);
-    src := src * 2 + FSoffset;
-    ReadSD(src, SYSTEM.ADR(dst)); ReadSD(src+1, SYSTEM.ADR(dst)+512) 
+    HAL.ReadSector(src, SYSTEM.ADR(dst))
   END GetSector;
   
   PROCEDURE PutSector*(dst: INTEGER; VAR src: Sector);
   BEGIN dst := dst DIV 29; ASSERT(SYSTEM.H(0) =  0);
-    dst := dst * 2 + FSoffset;
-    WriteSD(dst, SYSTEM.ADR(src)); WriteSD(dst+1, SYSTEM.ADR(src)+512)
+    HAL.WriteSector(dst, SYSTEM.ADR(src))
   END PutSector;
 
 (*-------- Miscellaneous procedures----------*)
 
-  PROCEDURE Time*(): INTEGER;
-    VAR t: INTEGER;
-  BEGIN SYSTEM.GET(timer, t); RETURN t
+  PROCEDURE Time*(): INTEGER; (*milliseconds; oberonc: HAL timer, not RISC5 register*)
+  BEGIN RETURN HAL.Time()
   END Time;
 
   PROCEDURE Clock*(): INTEGER;
@@ -248,7 +247,9 @@ MODULE Kernel;  (*NW/PR  11.4.86 / 27.12.95 / 4.2.2014*)
   END SetClock;
 
   PROCEDURE Install*(Padr, at: INTEGER);
-  BEGIN SYSTEM.PUT(at, 0E7000000H + (Padr - at) DIV 4 -1)
+  (*oberonc: RISC5 trap vectors (branch instructions at low memory) have no
+    meaning on x86_64/AArch64; traps are reported by the runtime instead.
+    Original body: SYSTEM.PUT(at, 0E7000000H + (Padr - at) DIV 4 -1)*)
   END Install;
 
   PROCEDURE Trap(VAR a: INTEGER; b: INTEGER);

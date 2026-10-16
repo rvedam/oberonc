@@ -10,12 +10,12 @@
 // -----------------------------------------------------------------------
 
 enum class TypeKind {
-    Integer,   // INTEGER  (i64)
+    Integer,   // INTEGER  (i64, or i32 with --int32)
     Real,      // REAL     (double)
     Boolean,   // BOOLEAN  (i1)
     Char,      // CHAR     (i8)
     Byte,      // BYTE     (i8)
-    Set,       // SET      (i64 bitmask)
+    Set,       // SET      (i64 bitmask, or i32 with --int32)
     Nil,       // type of NIL literal
     String,    // string literal / ARRAY OF CHAR constant
     Array,     // ARRAY [N] OF T  (isOpen=true when ARRAY OF T)
@@ -51,6 +51,7 @@ struct OberonType {
     std::vector<RecordField> fields;
     std::string              baseName;   // record extension base
     std::string              baseModule;
+    std::string              tdName;     // type descriptor symbol ("" = none)
 
     // ---- Pointer ----
     OberonTypePtr ptrBase;

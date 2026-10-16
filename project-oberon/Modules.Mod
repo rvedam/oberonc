@@ -217,9 +217,13 @@ MODULE Modules;  (*Link and load on RISC; NW 20.10.2013 / 9.4.2016*)
 
   PROCEDURE Init*;
   BEGIN Files.Init; MTOrg := SYSTEM.REG(MT);
-    SYSTEM.GET(16, AllocPtr); SYSTEM.GET(20, root); SYSTEM.GET(24, limit); DEC(limit, 8000H)
+    (*oberonc: all modules are linked statically into one image, so there is no
+      boot-loader module table at addresses 16/20/24 and no loaded-module list.
+      Original: SYSTEM.GET(16, AllocPtr); SYSTEM.GET(20, root); SYSTEM.GET(24, limit); DEC(limit, 8000H)*)
+    AllocPtr := 0; root := NIL; limit := 0
   END Init;
 
-BEGIN Init; Load("Oberon", M);
-    LED(res); REPEAT UNTIL FALSE  (*only if load fails*)
+(*oberonc: the boot loader's Load("Oberon", M) is replaced by static linking; the
+  module bodies run in dependency order from oberon_main (see System.Mod)*)
+BEGIN Init
 END Modules.

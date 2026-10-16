@@ -35,6 +35,12 @@ _start:
     add     x0, x0, :lo12:_stack_top
     mov     sp, x0
 
+    /* Install the exception vectors (report faults on the UART) */
+    adrp    x0, _vectors
+    add     x0, x0, :lo12:_vectors
+    msr     vbar_el1, x0
+    isb
+
     /* Zero BSS */
     adrp    x1, _bss_start
     add     x1, x1, :lo12:_bss_start
@@ -58,11 +64,49 @@ _start:
     b       .Lhalt
 
 /* -----------------------------------------------------------------------
- * Stack (64 KiB) and BSS markers — linker script exposes _bss_start/_bss_end
+ * Exception vector table: 16 entries of 0x80 bytes. Every exception is
+ * fatal here; hal_exception(kind, ESR, ELR, FAR) prints it and halts.
+ * ----------------------------------------------------------------------- */
+.macro VECTOR kind
+    .balign 0x80
+    mov     x0, #\kind
+    b       .Lexception
+.endm
+
+.balign 0x800
+_vectors:
+    VECTOR 0
+    VECTOR 1
+    VECTOR 2
+    VECTOR 3
+    VECTOR 4
+    VECTOR 5
+    VECTOR 6
+    VECTOR 7
+    VECTOR 8
+    VECTOR 9
+    VECTOR 10
+    VECTOR 11
+    VECTOR 12
+    VECTOR 13
+    VECTOR 14
+    VECTOR 15
+
+.Lexception:
+    mrs     x1, esr_el1
+    mrs     x2, elr_el1
+    mrs     x3, far_el1
+    bl      hal_exception
+    b       .Lhalt
+
+/* -----------------------------------------------------------------------
+ * Stack (1 MiB; Project Oberon procedures keep 1 KiB sector buffers on the
+ * stack and recurse) and BSS markers — the linker script exposes
+ * _bss_start/_bss_end
  * ----------------------------------------------------------------------- */
 .section .bss
 .align 16
-_stack_bot: .space 65536
+_stack_bot: .space 1048576
 _stack_top:
 
 /* Tell the linker this code does not require an executable stack */

@@ -14,6 +14,16 @@ static void bare_puts(const char* s) {
     while (*s) hal_putc(*s++);
 }
 
+extern "C" void hal_puts(const char* s) { bare_puts(s); }
+
+extern "C" void hal_put_hex(uint64_t v) {
+    hal_putc('0'); hal_putc('x');
+    for (int i = 60; i >= 0; i -= 4) {
+        unsigned n = (v >> i) & 0xF;
+        hal_putc(static_cast<char>(n < 10 ? '0' + n : 'A' + n - 10));
+    }
+}
+
 // Blocking character read (spin until a byte arrives).
 static char blocking_getc() {
     int c;
@@ -37,6 +47,33 @@ static const double pow10_table[45] = {
 };
 
 extern "C" {
+
+// ---------------------------------------------------------------------------
+// C memory primitives: LLVM lowers variable-length copies (array and string
+// assignment) to calls to these. -ffreestanding keeps clang from turning the
+// loops back into calls to themselves.
+// ---------------------------------------------------------------------------
+
+void* memcpy(void* dst, const void* src, size_t n) {
+    auto* d = static_cast<uint8_t*>(dst);
+    auto* s = static_cast<const uint8_t*>(src);
+    for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    return dst;
+}
+
+void* memmove(void* dst, const void* src, size_t n) {
+    auto* d = static_cast<uint8_t*>(dst);
+    auto* s = static_cast<const uint8_t*>(src);
+    if (d < s) for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    else       for (size_t i = n; i > 0; --i) d[i - 1] = s[i - 1];
+    return dst;
+}
+
+void* memset(void* dst, int c, size_t n) {
+    auto* d = static_cast<uint8_t*>(dst);
+    for (size_t i = 0; i < n; ++i) d[i] = static_cast<uint8_t>(c);
+    return dst;
+}
 
 // ---------------------------------------------------------------------------
 // Out module
@@ -240,7 +277,9 @@ void In_Real(double* x) {
 // ---------------------------------------------------------------------------
 
 [[noreturn]] void Oberon_Trap() {
-    bare_puts("Oberon: assertion failed\n");
+    bare_puts("Oberon: assertion failed, called from ");
+    hal_put_hex(reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+    bare_puts("\n");
     hal_halt();
 }
 
@@ -248,7 +287,9 @@ void In_Real(double* x) {
 // Heap allocator
 // ---------------------------------------------------------------------------
 
-static uint8_t heap[1 << 20]; // 1 MiB; zeroed by boot stub (BSS)
+// 16 MiB: Project Oberon allocates all texts, viewers, fonts and file buffers
+// here and never frees them (Kernel's collector is not used).
+static uint8_t heap[16 << 20]; // zeroed by boot stub (BSS)
 static size_t  heap_ptr = 0;
 
 // Kernel.Mod's own dummy free-list heap (Kernel.Init/Mark/Scan) is carved out

@@ -54,6 +54,14 @@ void CodeGen::writeIR(llvm::raw_ostream& os) {
 }
 
 void CodeGen::writeObject(const std::string& path) {
+    {
+        std::string err;
+        llvm::raw_string_ostream es(err);
+        if (llvm::verifyModule(*llvmMod_, &es)) {
+            es.flush();
+            throw std::runtime_error("LLVM module verification failed:\n" + err);
+        }
+    }
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
@@ -123,13 +131,72 @@ llvm::Value* CodeGen::coerce(llvm::Value* v, llvm::Type* tgt) {
     // Pointer → pointer bitcast
     if (v->getType()->isPointerTy() && tgt->isPointerTy())
         return b_->CreateBitCast(v, tgt);
-    // Integer widen/narrow
-    if (v->getType()->isIntegerTy() && tgt->isIntegerTy())
+    // Integer widen/narrow. BOOLEAN (i1), CHAR and BYTE (i8) are unsigned and
+    // zero-extend; INTEGER widens with sign extension.
+    if (v->getType()->isIntegerTy() && tgt->isIntegerTy()) {
+        unsigned from = v->getType()->getIntegerBitWidth();
+        if (from <= 8 && tgt->getIntegerBitWidth() > from)
+            return b_->CreateZExt(v, tgt);
         return b_->CreateSExtOrTrunc(v, tgt);
-    // i1 → i8 (bool stored as char)
-    if (v->getType()->isIntegerTy(1) && tgt->isIntegerTy(8))
-        return b_->CreateZExt(v, tgt);
+    }
+    // REAL width conversion (e.g. 32-bit REAL passed to Out_Real(double))
+    if (v->getType()->isFloatingPointTy() && tgt->isFloatingPointTy())
+        return b_->CreateFPCast(v, tgt);
     return v;
+}
+
+llvm::IntegerType* CodeGen::intTy() {
+    return int32_ ? llvm::Type::getInt32Ty(ctx_) : llvm::Type::getInt64Ty(ctx_);
+}
+
+llvm::ConstantInt* CodeGen::intConst(int64_t v) {
+    unsigned bits = intTy()->getBitWidth();
+    auto u = static_cast<uint64_t>(v);
+    if (bits < 64) u &= (uint64_t(1) << bits) - 1;   // wrap, as RISC5 does for 32-bit literals
+    return llvm::ConstantInt::get(ctx_, llvm::APInt(bits, u));
+}
+
+llvm::Type* CodeGen::realTy() {
+    return int32_ ? llvm::Type::getFloatTy(ctx_) : llvm::Type::getDoubleTy(ctx_);
+}
+
+llvm::PointerType* CodeGen::ptrTy() {
+    return llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0);
+}
+
+std::vector<ProcParam> CodeGen::paramsOf(const FormalParameters* fp) {
+    std::vector<ProcParam> ps;
+    if (!fp) return ps;
+    for (auto& sec : fp->sections) {
+        OberonTypePtr ot = resolveType(*sec.formalType);
+        for (auto& n : sec.names) ps.push_back({sec.isVar, n, ot});
+    }
+    return ps;
+}
+
+std::vector<CodeGen::Formal> CodeGen::makeFormals(const std::vector<ProcParam>& params) {
+    std::vector<Formal> fs;
+    for (auto& p : params) {
+        Formal f;
+        f.type = p.type;
+        TypeKind k = p.type ? p.type->kind : TypeKind::Integer;
+        bool open  = k == TypeKind::Array && p.type->isOpen;
+        f.byRef    = p.isVar || k == TypeKind::Array || k == TypeKind::Record;
+        if (open)                                   f.hidden = Hidden::Len;
+        else if (p.isVar && k == TypeKind::Record)  f.hidden = Hidden::Tag;
+        fs.push_back(std::move(f));
+    }
+    return fs;
+}
+
+void CodeGen::formalLLVMTypes(const std::vector<Formal>& fs, std::vector<llvm::Type*>& out) {
+    for (auto& f : fs) {
+        bool open = f.hidden == Hidden::Len;
+        llvm::Type* lt = open ? toLLVM(f.type->elem) : toLLVM(f.type);
+        out.push_back(f.byRef ? llvm::PointerType::get(lt, 0) : lt);
+        if (f.hidden == Hidden::Len) out.push_back(llvm::Type::getInt64Ty(ctx_));
+        if (f.hidden == Hidden::Tag) out.push_back(ptrTy());
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -263,9 +330,9 @@ llvm::Type* CodeGen::toLLVM(OberonTypePtr t) {
     switch (t->kind) {
     case TypeKind::Integer:
     case TypeKind::Set:
-        result = llvm::Type::getInt64Ty(ctx_); break;
+        result = intTy(); break;
     case TypeKind::Real:
-        result = llvm::Type::getDoubleTy(ctx_); break;
+        result = realTy(); break;
     case TypeKind::Boolean:
         result = llvm::Type::getInt1Ty(ctx_); break;
     case TypeKind::Char:
@@ -298,22 +365,9 @@ llvm::Type* CodeGen::toLLVM(OberonTypePtr t) {
         else
             result = llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0);
         break;
-    case TypeKind::Procedure: {
-        std::vector<llvm::Type*> pts;
-        for (auto& p : t->params) {
-            llvm::Type* pt = toLLVM(p.type);
-            // Aggregates (arrays, records) must be passed as pointers in LLVM IR
-            if (p.type && (p.type->kind == TypeKind::Array ||
-                           p.type->kind == TypeKind::Record))
-                pt = llvm::PointerType::get(pt, 0);
-            else if (p.isVar)
-                pt = llvm::PointerType::get(pt, 0);
-            pts.push_back(pt);
-        }
-        auto* rty = t->retType ? toLLVM(t->retType) : llvm::Type::getVoidTy(ctx_);
-        result = llvm::PointerType::get(llvm::FunctionType::get(rty, pts, false), 0);
+    case TypeKind::Procedure:
+        result = llvm::PointerType::get(toLLVMFunctionType(t), 0);
         break;
-    }
     }
     if (result) llvmTypeCache_[t.get()] = result;
     return result;
@@ -322,16 +376,7 @@ llvm::Type* CodeGen::toLLVM(OberonTypePtr t) {
 llvm::FunctionType* CodeGen::toLLVMFunctionType(OberonTypePtr t) {
     assert(t && t->kind == TypeKind::Procedure);
     std::vector<llvm::Type*> pts;
-    for (auto& p : t->params) {
-        llvm::Type* pt = toLLVM(p.type);
-        // Aggregates (arrays, records) must be passed as pointers in LLVM IR
-        if (p.type && (p.type->kind == TypeKind::Array ||
-                       p.type->kind == TypeKind::Record))
-            pt = llvm::PointerType::get(pt, 0);
-        else if (p.isVar)
-            pt = llvm::PointerType::get(pt, 0);
-        pts.push_back(pt);
-    }
+    formalLLVMTypes(makeFormals(t->params), pts);
     auto* rty = t->retType ? toLLVM(t->retType) : llvm::Type::getVoidTy(ctx_);
     return llvm::FunctionType::get(rty, pts, false);
 }
@@ -350,6 +395,9 @@ void CodeGen::registerTypeDecls(const std::vector<TypeDecl>& decls) {
             auto ot = std::make_shared<OberonType>();
             ot->kind = TypeKind::Record;
             ot->name = td.name;
+            // Procedure-local types are qualified by the enclosing procedure.
+            ot->tdName = (curFunc_ ? curFunc_->getName().str() : modName_)
+                         + "_" + td.name + "__td";
             typeTable_[td.name] = ot;
             // Cache the LLVM type immediately
             llvmTypeCache_[ot.get()] = st;
@@ -382,6 +430,7 @@ void CodeGen::fillTypeDecls(const std::vector<TypeDecl>& decls) {
                 existing->second->fields     = ot->fields;
                 existing->second->baseName   = ot->baseName;
                 existing->second->baseModule = ot->baseModule;
+                emitTypeDescriptor(existing->second);
             } else {
                 typeTable_[td.name] = ot;
             }
@@ -462,16 +511,28 @@ void CodeGen::genImports(const std::vector<ImportEntry>& imports) {
                 {llvm::PointerType::get(dbl, 0)}, false));
             decl("In_Char", llvm::FunctionType::get(voidTy,
                 {llvm::PointerType::get(llvm::Type::getInt8Ty(ctx_), 0)}, false));
+            // In_* take their single argument by reference (VAR).
+            for (auto* n : {"In_Int", "In_Real", "In_Char"}) {
+                Formal f; f.byRef = true;
+                formals_[extFuncs_[n]] = {f};
+            }
         } else if (mod == "HAL") {
-            auto decl = [&](const char* fn) {
-                auto* ft = llvm::FunctionType::get(i64, {}, false);
-                extFuncs_[std::string(fn)] =
-                    llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
-                                            fn, llvmMod_.get());
+            // Hardware abstraction layer, implemented per platform in the
+            // runtime (runtime/platform/<arch>/hal.cpp). All values are i64.
+            struct HalFn { const char* name; unsigned nargs; bool returns; };
+            static constexpr HalFn halFns[] = {
+                {"HAL_FramebufferBase", 0, true},  {"HAL_HeapOrigin", 0, true},
+                {"HAL_MemLimit",        0, true},  {"HAL_Time",       0, true},
+                {"HAL_Mouse",           0, true},  {"HAL_Keyboard",   0, true},
+                {"HAL_ReadSector",      2, false}, {"HAL_WriteSector", 2, false},
             };
-            decl("HAL_FramebufferBase");
-            decl("HAL_HeapOrigin");
-            decl("HAL_MemLimit");
+            for (auto& h : halFns) {
+                std::vector<llvm::Type*> ps(h.nargs, i64);
+                auto* ft = llvm::FunctionType::get(h.returns ? i64 : voidTy, ps, false);
+                extFuncs_[h.name] =
+                    llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                            h.name, llvmMod_.get());
+            }
         }
         // SYSTEM: all procedures are compiler intrinsics — no runtime declarations
         else if (mod == "SYSTEM") {
@@ -533,7 +594,6 @@ void CodeGen::loadModuleInterface(const std::string& alias,
     }
 
     // Import exported constants as compile-time values in the symbol table.
-    auto* i64c = llvm::Type::getInt64Ty(ctx_);
     std::vector<std::string> importTempConstKeys;
     for (auto& cd : importedMod.decls.consts) {
         if (!cd.exported) continue;
@@ -544,7 +604,7 @@ void CodeGen::loadModuleInterface(const std::string& alias,
             Symbol sym;
             sym.isConst = true;
             sym.type    = typeTable_["INTEGER"];
-            sym.llvmVal = llvm::ConstantInt::get(i64c, val);
+            sym.llvmVal = intConst(val);
             addSym(symKey, sym); // copy; we also register the short name below
             // Register under the short name so that Pass 2 resolveType/evalConstInt
             // can resolve unqualified references (e.g. "FnLength" in the expression
@@ -598,6 +658,7 @@ void CodeGen::loadModuleInterface(const std::string& alias,
 
         if (dynamic_cast<const RecordTypeExpr*>(td.type.get())) {
             stub->kind = TypeKind::Record;
+            stub->tdName = modName + "_" + td.name + "__td";
             if (td.exported) {
                 // Named LLVM struct only for exported types (imported by name).
                 if (!llvm::StructType::getTypeByName(ctx_, qualKey))
@@ -688,33 +749,22 @@ void CodeGen::loadModuleInterface(const std::string& alias,
         std::string fname = modName + "_" + pd->name;
         if (llvmMod_->getFunction(fname)) continue; // already declared
 
+        std::vector<Formal> fs = makeFormals(paramsOf(pd->params ? &*pd->params : nullptr));
         std::vector<llvm::Type*> paramTys;
-        std::vector<bool> openFlags;
-        if (pd->params) {
-            for (auto& sec : pd->params->sections) {
-                OberonTypePtr ot = resolveType(*sec.formalType);
-                llvm::Type*   lt = toLLVM(ot);
-                bool isOpenArr = (ot->kind == TypeKind::Array && ot->isOpen);
-                if (sec.isVar || ot->kind == TypeKind::Array)
-                    lt = llvm::PointerType::get(isOpenArr ? toLLVM(ot->elem) : lt, 0);
-                for (size_t i = 0; i < sec.names.size(); ++i) {
-                    paramTys.push_back(lt);
-                    openFlags.push_back(isOpenArr);
-                    if (isOpenArr)
-                        paramTys.push_back(llvm::Type::getInt64Ty(ctx_)); // hidden length
-                }
-            }
-        }
+        formalLLVMTypes(fs, paramTys);
 
+        OberonTypePtr retOT;
         llvm::Type* retTy = llvm::Type::getVoidTy(ctx_);
-        if (pd->params && !pd->params->retIdent.empty())
-            retTy = toLLVM(resolveTypeName(pd->params->retModule,
-                                            pd->params->retIdent));
+        if (pd->params && !pd->params->retIdent.empty()) {
+            retOT = resolveTypeName(pd->params->retModule, pd->params->retIdent);
+            retTy = toLLVM(retOT);
+        }
 
         auto* ft = llvm::FunctionType::get(retTy, paramTys, false);
         auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                            fname, llvmMod_.get());
-        openArrayFormals_[fn] = std::move(openFlags);
+        formals_[fn]      = std::move(fs);
+        procRetTypes_[fn] = retOT;
         extFuncs_[alias + "_" + pd->name] = fn;
     }
 
@@ -802,12 +852,10 @@ void CodeGen::genConstDecls(const std::vector<ConstDecl>& decls, bool global) {
             }
         } else if (auto* i = dynamic_cast<const IntLitExpr*>(cd.value.get())) {
             sym.type    = typeTable_["INTEGER"];
-            sym.llvmVal = llvm::ConstantInt::get(
-                llvm::Type::getInt64Ty(ctx_), parseIntLit(i->raw));
+            sym.llvmVal = intConst(parseIntLit(i->raw));
         } else if (auto* r = dynamic_cast<const RealLitExpr*>(cd.value.get())) {
             sym.type    = typeTable_["REAL"];
-            sym.llvmVal = llvm::ConstantFP::get(
-                llvm::Type::getDoubleTy(ctx_), parseRealLit(r->raw));
+            sym.llvmVal = llvm::ConstantFP::get(realTy(), parseRealLit(r->raw));
         } else if (dynamic_cast<const TrueExpr*>(cd.value.get())) {
             sym.type    = typeTable_["BOOLEAN"];
             sym.llvmVal = llvm::ConstantInt::getTrue(ctx_);
@@ -820,7 +868,7 @@ void CodeGen::genConstDecls(const std::vector<ConstDecl>& decls, bool global) {
             try {
                 int64_t val = evalConstInt(*cd.value);
                 sym.type    = typeTable_["INTEGER"];
-                sym.llvmVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), val);
+                sym.llvmVal = intConst(val);
             } catch (const std::runtime_error&) {
                 // Not a constant integer: can only generate in a function context.
                 if (!global) {
@@ -856,7 +904,7 @@ void CodeGen::genVarDecls(const std::vector<VarDecl>& decls, bool global) {
                 llvm::Constant* init = nullptr;
                 if (lt->isIntegerTy())
                     init = llvm::ConstantInt::get(lt, 0);
-                else if (lt->isDoubleTy())
+                else if (lt->isFloatingPointTy())
                     init = llvm::ConstantFP::get(lt, 0.0);
                 else if (lt->isPointerTy())
                     init = llvm::ConstantPointerNull::get(
@@ -888,34 +936,23 @@ void CodeGen::declareProcs(const std::vector<std::shared_ptr<ProcDecl>>& procs) 
     for (auto& pd : procs) {
         std::string fname = modName_ + "_" + pd->name;
 
-        // Build LLVM parameter types.
-        // Open arrays (ARRAY OF T) are passed as two params: ptr + i64 length.
+        // Build LLVM parameter types. Open arrays (ARRAY OF T) are passed as
+        // ptr + hidden i64 length; VAR records as ptr + hidden type tag.
+        std::vector<Formal> fs = makeFormals(paramsOf(pd->params ? &*pd->params : nullptr));
         std::vector<llvm::Type*> paramTys;
-        std::vector<bool> openFlags; // true at index i → formal i is open array
-        if (pd->params) {
-            for (auto& sec : pd->params->sections) {
-                OberonTypePtr ot = resolveType(*sec.formalType);
-                llvm::Type*   lt = toLLVM(ot);
-                bool isOpenArr = (ot->kind == TypeKind::Array && ot->isOpen);
-                if (sec.isVar || ot->kind == TypeKind::Array)
-                    lt = llvm::PointerType::get(isOpenArr ? toLLVM(ot->elem) : lt, 0);
-                for (size_t i = 0; i < sec.names.size(); ++i) {
-                    paramTys.push_back(lt);
-                    openFlags.push_back(isOpenArr);
-                    if (isOpenArr)
-                        paramTys.push_back(llvm::Type::getInt64Ty(ctx_)); // hidden length
-                }
-            }
-        }
+        formalLLVMTypes(fs, paramTys);
+        OberonTypePtr retOT;
         llvm::Type* retTy = llvm::Type::getVoidTy(ctx_);
-        if (pd->params && !pd->params->retIdent.empty())
-            retTy = toLLVM(resolveTypeName(pd->params->retModule,
-                                            pd->params->retIdent));
+        if (pd->params && !pd->params->retIdent.empty()) {
+            retOT = resolveTypeName(pd->params->retModule, pd->params->retIdent);
+            retTy = toLLVM(retOT);
+        }
 
         auto* ft = llvm::FunctionType::get(retTy, paramTys, false);
         auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                            fname, llvmMod_.get());
-        openArrayFormals_[fn] = std::move(openFlags);
+        formals_[fn]      = std::move(fs);
+        procRetTypes_[fn] = retOT;
 
         // Register in symbol table so the procedure can be used as a first-class
         // value (e.g. assigned to a procedure variable: p.handler := MyProc).
@@ -959,13 +996,19 @@ void CodeGen::genProc(const ProcDecl& pd) {
             for (auto& pname : sec.names) {
                 Symbol sym;
                 sym.type = ot;
-                if (sec.isVar || ot->kind == TypeKind::Array) {
-                    // VAR or open-array param: argument IS the pointer
+                if (sec.isVar || ot->kind == TypeKind::Array || ot->kind == TypeKind::Record) {
+                    // VAR or structured param: argument IS the pointer. (Structured
+                    // value parameters are read-only in Oberon-07, so no copy.)
                     sym.llvmVal = &*argIt;
                     sym.isVar   = true;
                     argIt->setName(pname);
-                    addSym(pname, std::move(sym));
                     ++argIt;
+                    if (sec.isVar && ot->kind == TypeKind::Record) {
+                        argIt->setName("__tag_" + pname);
+                        sym.tagVal = &*argIt;
+                        ++argIt;
+                    }
+                    addSym(pname, std::move(sym));
                     if (ot->kind == TypeKind::Array && ot->isOpen) {
                         // Bind the hidden length argument to "__len_<name>".
                         auto* lenAlloca = createEntryAlloca(

@@ -4,6 +4,8 @@
 #include "../hal.hpp"
 #include "../../compat_stdint.hpp"
 
+static void ramfb_init();
+
 // ---------------------------------------------------------------------------
 // PL011 UART register offsets
 // ---------------------------------------------------------------------------
@@ -50,6 +52,8 @@ void hal_init() {
     asm volatile("msr cpacr_el1, %0" : : "r"(cpacr));
     asm volatile("isb");
 #endif
+
+    ramfb_init();   // after the FPU enable: clang may use SIMD registers for copies
 }
 
 void hal_putc(char c) {
@@ -81,14 +85,122 @@ int hal_getc() {
 // hardcoded literal (see src/codegen.cpp's HAL pseudo-module), so this is a
 // transparent substitution from the Oberon source's point of view.
 static constexpr int FB_W = 1024, FB_H = 768;
-static uint8_t shadow_fb[FB_H][FB_W / 8]; // 98,304 bytes, zeroed by boot stub (BSS)
+alignas(16) static uint8_t shadow_fb[FB_H][FB_W / 8]; // 98,304 bytes, zeroed by boot stub (BSS)
 
 int64_t HAL_FramebufferBase() {
     return reinterpret_cast<int64_t>(&shadow_fb[0][0]);
 }
 
-// TODO(Bug 6 / Step 9): drive a real QEMU `virt` display device (ramfb) and
-// blit shadow_fb into it here. Until then this is a no-op, same as before —
-// Display.Mod can now write to shadow_fb without faulting, but nothing
-// reads it yet.
-void hal_display_flush() {}
+// ---------------------------------------------------------------------------
+// Timer: the generic timer's virtual counter (CNTVCT_EL0 / CNTFRQ_EL0)
+// ---------------------------------------------------------------------------
+
+int64_t HAL_Time() {
+    uint64_t cnt = 0, frq = 1000;
+#ifdef __aarch64__
+    asm volatile("isb; mrs %0, cntvct_el0" : "=r"(cnt));
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+#endif
+    return static_cast<int64_t>(cnt / (frq / 1000));
+}
+
+// ---------------------------------------------------------------------------
+// Display: QEMU ramfb, configured through the fw_cfg DMA interface.
+//
+// fw_cfg on the virt machine is an MMIO device at 0x09020000 (selector at +8,
+// DMA address at +16). Its registers and all DMA structures are big-endian.
+// The guest owns the pixel memory; QEMU scans it out on every refresh, so
+// hal_display_flush only has to expand the 1bpp shadow buffer into it.
+// Run QEMU with `-device ramfb` (absent → display stays disabled).
+// ---------------------------------------------------------------------------
+
+static constexpr uintptr_t FW_CFG_BASE     = 0x09020000UL;
+static constexpr uint16_t  FW_CFG_FILE_DIR = 0x19;
+static constexpr uint32_t  DMA_CTL_ERROR = 0x01, DMA_CTL_READ = 0x02,
+                           DMA_CTL_SELECT = 0x08, DMA_CTL_WRITE = 0x10;
+static constexpr uint32_t  DRM_FORMAT_XRGB8888 = 0x34325258; // fourcc "XR24"
+
+static inline uint16_t be16(uint16_t v) { return __builtin_bswap16(v); }
+static inline uint32_t be32(uint32_t v) { return __builtin_bswap32(v); }
+static inline uint64_t be64(uint64_t v) { return __builtin_bswap64(v); }
+
+struct FwCfgDmaAccess { uint32_t control, length; uint64_t address; };
+
+// Runs one fw_cfg DMA transfer on the item `key`; returns false on error.
+static bool fw_cfg_dma(uint16_t key, uint32_t ctl, void* buf, uint32_t len) {
+    alignas(16) static volatile FwCfgDmaAccess acc;
+    acc.control = be32((static_cast<uint32_t>(key) << 16) | DMA_CTL_SELECT | ctl);
+    acc.length  = be32(len);
+    acc.address = be64(reinterpret_cast<uint64_t>(buf));
+    asm volatile("" ::: "memory");
+    *reinterpret_cast<volatile uint64_t*>(FW_CFG_BASE + 16) =
+        be64(reinterpret_cast<uint64_t>(&acc));          // starts the transfer
+    uint32_t c;
+    while ((c = be32(acc.control)) & ~DMA_CTL_ERROR) {}  // cleared when done
+    return (c & DMA_CTL_ERROR) == 0;
+}
+
+struct FwCfgFile { uint32_t size; uint16_t select, reserved; char name[56]; };
+
+static bool streq(const char* a, const char* b) {
+    while (*a && *a == *b) { ++a; ++b; }
+    return *a == *b;
+}
+
+alignas(4096) static uint32_t ramfb_pixels[FB_H][FB_W];   // XRGB8888, 3 MiB BSS
+static bool ramfb_ok = false;
+
+static void ramfb_init() {
+    // The file directory: a big-endian entry count followed by the entries.
+    static struct { uint32_t count; FwCfgFile files[64]; } dir;
+    if (!fw_cfg_dma(FW_CFG_FILE_DIR, DMA_CTL_READ, &dir, sizeof dir)) return;
+    uint32_t n = be32(dir.count);
+    if (n > 64) n = 64;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!streq(dir.files[i].name, "etc/ramfb")) continue;
+        struct __attribute__((packed)) {
+            uint64_t addr; uint32_t fourcc, flags, width, height, stride;
+        } static cfg;
+        cfg.addr   = be64(reinterpret_cast<uint64_t>(&ramfb_pixels[0][0]));
+        cfg.fourcc = be32(DRM_FORMAT_XRGB8888);
+        cfg.flags  = 0;
+        cfg.width  = be32(FB_W);
+        cfg.height = be32(FB_H);
+        cfg.stride = be32(FB_W * 4);
+        ramfb_ok = fw_cfg_dma(be16(dir.files[i].select), DMA_CTL_WRITE, &cfg, sizeof cfg);
+        hal_puts(ramfb_ok ? "[ramfb: 1024x768]\n" : "[ramfb: configuration failed]\n");
+        return;
+    }
+    hal_puts("[ramfb: none (run QEMU with -device ramfb)]\n");
+}
+
+// Project Oberon's frame buffer has y = 0 at the bottom (the RISC5 video
+// controller scans it in reverse); bit k of each 32-bit word is pixel x+k.
+void hal_display_flush() {
+    if (!ramfb_ok) return;
+    constexpr uint32_t WHITE = 0x00FFFFFF, BLACK = 0x00000000;
+    for (int line = 0; line < FB_H; ++line) {
+        const auto* src = reinterpret_cast<const uint32_t*>(shadow_fb[FB_H - 1 - line]);
+        uint32_t* dst = ramfb_pixels[line];
+        for (int w = 0; w < FB_W / 32; ++w) {
+            uint32_t word = src[w];
+            for (int bit = 0; bit < 32; ++bit)
+                *dst++ = (word >> bit) & 1 ? WHITE : BLACK;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exceptions (vector table in boot.S): report and stop
+// ---------------------------------------------------------------------------
+
+extern "C" [[noreturn]] void hal_exception(uint64_t kind, uint64_t esr, uint64_t elr,
+                                           uint64_t far) {
+    hal_puts("\n*** exception "); hal_put_hex(kind);
+    hal_puts(" ESR="); hal_put_hex(esr);
+    hal_puts(" ELR="); hal_put_hex(elr);
+    hal_puts(" FAR="); hal_put_hex(far);
+    hal_puts("\n");
+    hal_halt();
+}
