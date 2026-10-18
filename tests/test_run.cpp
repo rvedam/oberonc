@@ -1,10 +1,23 @@
 // Execution tests: compile an Oberon program, link it against the hosted
-// runtime, run it, and compare its standard output.
+// runtime (liboberon_runtime.a), run it as an ordinary host process, and
+// compare its standard output. They check what the generated code does at
+// run time, not just that it compiles.
 //
-// These cover run-time semantics (as opposed to "does it compile"), in both
-// the default 64-bit INTEGER mode and the Project Oberon --int32 mode.
-// Programs must not convert addresses to INTEGER in --int32 mode: host
-// addresses do not fit in 32 bits.
+// Each program can be compiled in either of oberonc's two type-size modes
+// (run()'s `int32` argument):
+//
+//   * Default: INTEGER and SET are 64 bits, REAL is a double.
+//   * --int32: INTEGER and SET are 32 bits, REAL is a float. This matches
+//     Niklaus Wirth's 32-bit RISC5 machine, the target of Project Oberon,
+//     the operating system whose modules (project-oberon/*.Mod) we compile
+//     into the bare-metal kernel. Those modules depend on 32-bit sizes in
+//     their record layouts, disk format and arithmetic (e.g. overflow
+//     wrap-around), so the kernel build uses this mode.
+//
+// In --int32 mode a test program must not turn an address into an INTEGER
+// (SYSTEM.ADR, ORD of a pointer): these tests run as normal macOS or Linux
+// processes, whose addresses lie above 4 GiB and would be truncated. Test
+// address arithmetic in the default mode instead.
 
 #include <catch2/catch_test_macros.hpp>
 #include "lexer.hpp"
@@ -13,9 +26,17 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
+#include <system_error>
+
+// mkdtemp (POSIX): <stdlib.h> per the standard, but macOS only declares it
+// in <unistd.h> under strict -std=c++20.
+#include <stdlib.h>
+#include <unistd.h>
 
 #ifndef TEST_MODULE_DIR
 #define TEST_MODULE_DIR "tests"
@@ -26,15 +47,50 @@
 
 namespace {
 
+// A uniquely named temporary directory that is deleted, with its contents,
+// when the object is destroyed.
+//
+// Interim wrapper: std::filesystem (C++17) has temp_directory_path() but no
+// way to create a unique directory, and no RAII owner for one. Replace this
+// class with the standard facility if a WG21 proposal for one is adopted.
+class TempDir {
+public:
+    explicit TempDir(const std::string& prefix) {
+        std::string tmpl = (std::filesystem::temp_directory_path() /
+                            (prefix + "XXXXXX")).string();
+        if (::mkdtemp(tmpl.data()) == nullptr)
+            throw std::runtime_error("mkdtemp failed for " + tmpl);
+        path_ = tmpl;
+    }
+    ~TempDir() {
+        std::error_code ec;                       // never throw from a destructor
+        std::filesystem::remove_all(path_, ec);
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+    TempDir(TempDir&&) = delete;
+    TempDir& operator=(TempDir&&) = delete;
+
+    const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+// This process's scratch directory, created on first use and deleted when
+// the process exits. Each process gets its own: ctest runs every test case
+// as a separate process, and they must not overwrite each other's files.
+const std::filesystem::path& scratchDir() {
+    static const TempDir dir("oberonc_run_tests_");
+    return dir.path();
+}
+
 // Compiles and runs `src` (feeding it `input` on stdin); returns its stdout,
 // or "COMPILE ERROR: …".
 std::string run(const std::string& src, bool int32, const std::string& input = "") {
-    namespace fs = std::filesystem;
     static int counter = 0;
-    fs::path dir = fs::temp_directory_path() / "oberonc_run_tests";
-    fs::create_directories(dir);
-    std::string stem = (dir / ("prog" + std::to_string(counter++) +
-                               (int32 ? "_32" : "_64"))).string();
+    std::string stem = (scratchDir() / ("prog" + std::to_string(counter++) +
+                                        (int32 ? "_32" : "_64"))).string();
     try {
         Lexer  lex(src, "<test>");
         Parser parser(lex);
