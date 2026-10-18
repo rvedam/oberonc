@@ -586,7 +586,11 @@ Limitations:
 
 `runtime/boot/x86_64/boot.S` puts the 1 MiB stack in `.bss` directly after the page tables (`pml4`, `pdpt`, `pd0`–`pd3`), with no unmapped guard page, and the IDT has no IST stack for `#PF`/`#DF`. An overflow (deep Project Oberon recursion with 1 KiB sector buffers on the stack was the reason for growing it) silently overwrites the live 2 MiB mappings. The result is random corruption or a triple fault, never the `*** exception` report.
 
-**While writing kernel tests:** treat unexplained corruption, spontaneous resets or a silent QEMU exit (`-no-reboot`) on x86_64 as a possible stack overflow. Checks: compare RSP with `_stack_bot` from the QEMU monitor (`info registers`), or temporarily grow the stack and see whether the symptom moves. AArch64 has the same layout question; check its boot.S too.
+**While writing kernel tests:** treat unexplained corruption, spontaneous resets or a silent QEMU exit (`-no-reboot`) on x86_64 as a possible stack overflow. Checks: compare RSP with `_stack_bot` from the QEMU monitor (`info registers`), or temporarily grow the stack and see whether the symptom moves.
+
+**Confirmed 2026-10-17** with a runaway recursion (each call with a 1024-INTEGER local array) on both architectures. Neither prints an exception report:
+- **x86_64** triple-faults; with `-no-reboot` QEMU exits with status 0. The boot smoke test reports this as "QEMU exited".
+- **AArch64** hangs silently; the smoke test only catches it by timing out. The exception handler probably faults again on the same overflowed stack (`SP_EL1`), so a fix there needs a separate exception stack, or a check of `SP` on entry.
 
 Fix options: put the stack below the page tables, separated by an unmapped 4 KiB page (this needs 4 KiB mappings around it instead of a 2 MiB huge page), and/or give `#DF` (and `#PF`) an IST stack in a TSS so the overflow is reported instead of triple-faulting.
 

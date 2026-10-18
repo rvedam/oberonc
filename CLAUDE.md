@@ -89,7 +89,11 @@ cmake -B build        -DKERNEL_ARCH=apple-aarch64   # → build/project_oberon_a
 cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64    # → build_x86_64/project_oberon_x86_64.elf
 cmake --build build --target project_oberon_kernel   # full 14-module Project Oberon (--int32)
 cmake --build build --target run_project_oberon      # add -DKERNEL_QEMU_DISPLAY=cocoa for a window
+(cd build && ctest -L smoke --output-on-failure)     # boot smoke tests (builds the kernels first)
+(cd build && ctest -LE smoke -j8)                    # unit tests only (skip the QEMU boots)
 ```
+
+Boot smoke tests (`tests/smoke/boot_smoke.py`, CTest label `smoke`) boot each kernel headless under QEMU. The Hello kernel must print "Hello, World!" on serial, and the Project Oberon desktop must match `tests/smoke/po_desktop.png` pixel for pixel. Both architectures render the same image. A CPU exception report, or QEMU exiting (an x86 triple fault), fails the test; the serial log and last screen are saved to `<build>/smoke/`. After an intended change to the desktop, run `cmake --build build --target update_smoke_reference` and review the new PNG before committing it.
 
 Linux hosts:
 

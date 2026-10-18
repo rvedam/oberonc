@@ -470,6 +470,43 @@ elseif(KERNEL_ARCH MATCHES "^apple-(aarch64|x86_64)$")
             COMMENT "Running Project Oberon kernel under QEMU"
             USES_TERMINAL)
         message(STATUS "run_project_oberon target available")
+
+        # ---- Boot smoke tests (ctest -L smoke) -----------------------------
+        # tests/smoke/boot_smoke.py boots each kernel headless: the Hello
+        # kernel must print "Hello, World!" on serial, and the Project Oberon
+        # desktop must match tests/smoke/po_desktop.png pixel for pixel (both
+        # architectures render the same image). A CPU exception or QEMU
+        # exiting (triple fault, e.g. a stack overflow) fails the test.
+        # Failure artefacts (serial log, last screen) go to smoke/.
+        # smoke_build_kernels runs a nested build (it can relink oberonc), so
+        # it runs alone (RUN_SERIAL), never alongside the unit tests. For the
+        # unit tests only: ctest -LE smoke.
+        list(JOIN QEMU_MACHINE " " QEMU_MACHINE_STR)
+        set(SMOKE_REF "${CMAKE_SOURCE_DIR}/tests/smoke/po_desktop.png")
+        set(SMOKE ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/smoke/boot_smoke.py
+            --qemu ${QEMU_BIN} "--machine=${QEMU_MACHINE_STR}"
+            --artifacts ${CMAKE_BINARY_DIR}/smoke)
+
+        add_test(NAME smoke_build_kernels
+            COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+                    --target kernel project_oberon_kernel)
+        add_test(NAME smoke_hello_${BARE_ARCH}
+            COMMAND ${SMOKE} --kernel ${CMAKE_BINARY_DIR}/kernel_${BARE_ARCH}.elf
+                    --expect-serial "Hello, World!" --timeout 30)
+        add_test(NAME smoke_project_oberon_${BARE_ARCH}
+            COMMAND ${SMOKE} --kernel ${PO_KERNEL} --screen-ref ${SMOKE_REF} --timeout 60)
+        set_tests_properties(smoke_build_kernels PROPERTIES
+            FIXTURES_SETUP smoke_kernels LABELS smoke RUN_SERIAL TRUE)
+        set_tests_properties(smoke_hello_${BARE_ARCH} smoke_project_oberon_${BARE_ARCH}
+            PROPERTIES FIXTURES_REQUIRED smoke_kernels LABELS smoke)
+
+        # Regenerate the reference after an intended change to the desktop
+        # (review the new PNG before committing it).
+        add_custom_target(update_smoke_reference
+            COMMAND ${SMOKE} --kernel ${PO_KERNEL} --screen-ref ${SMOKE_REF} --update
+            DEPENDS project_oberon_kernel
+            COMMENT "Updating tests/smoke/po_desktop.png from the ${BARE_ARCH} desktop"
+            VERBATIM)
     endif()
 else()
     message(FATAL_ERROR
