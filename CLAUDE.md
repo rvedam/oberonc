@@ -65,20 +65,33 @@ The `runtime/` directory contains a bare-metal runtime that replaces `liboberon_
 
 | Path | Role |
 |---|---|
-| `runtime/oberon_runtime_bare.cpp` | Implements `Out_*`, `In_*`, `Oberon_NEW` via `hal_*` calls; 1 MiB bump-allocator heap in BSS |
+| `runtime/oberon_runtime_bare.cpp` | Implements `Out_*`, `In_*`, `Oberon_NEW`, `memcpy`/`memset`, `floor` via `hal_*` calls; 16 MiB bump-allocator heap in BSS |
+| `runtime/framebuffer.cpp` | Shared 1bpp Project Oberon shadow frame buffer (`HAL_FramebufferBase`) and `fb_expand_xrgb` (y-flipped, incremental) |
+| `runtime/po_devices.cpp` | Shared Project Oberon devices: RAM-disk sectors, serial→PS/2 keyboard, mouse word, periodic display flush |
+| `runtime/po_disk_image.S` + `tools/mkpodisk.py` | Builds a Project Oberon file-system image (font + System.Tool) and embeds it in `.data` |
 | `runtime/platform/hal.hpp` | HAL interface: `hal_init()`, `hal_putc()`, `hal_getc()`, `hal_halt()` |
 | `runtime/platform/x86_64/hal.cpp` | x86-64 HAL: VGA text buffer (0xB8000) + COM1 UART (0x3F8, 38400 baud 8N1) |
 | `runtime/platform/aarch64/hal.cpp` | AArch64 HAL: PL011 UART at 0x09000000 (QEMU `virt` machine, 38400 baud) |
 | `runtime/boot/x86_64/boot.S` | Multiboot2 header, 32→64 mode switch, identity-maps first 1 GiB with 2 MiB huge pages, zeroes BSS |
 | `runtime/boot/x86_64/kernel.ld` | Linker script: loads at 0x100000, `.multiboot2` first |
-| `runtime/boot/aarch64/boot.S` | Drops from EL2→EL1, sets stack, zeroes BSS |
+| `runtime/boot/aarch64/boot.S` | Drops from EL2→EL1, installs exception vectors, enables the MMU (identity map), zeroes BSS |
 | `runtime/boot/aarch64/kernel.ld` | Linker script: loads at 0x40080000 |
 
 Boot sequence in both architectures: `_start` → `hal_init()` → `oberon_main()` → `hal_halt()`.
 
 ### CMake targets
 
-Select the target architecture at configure time with `-DKERNEL_ARCH=` (default: `x86_64`):
+Select the target architecture at configure time with `-DKERNEL_ARCH=` (default: `x86_64`).
+On macOS use `apple-aarch64` or `apple-x86_64` (Homebrew LLVM 18 cross-toolchain), one build tree per architecture:
+
+```bash
+cmake -B build        -DKERNEL_ARCH=apple-aarch64   # → build/project_oberon_aarch64.elf
+cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64    # → build_x86_64/project_oberon_x86_64.elf
+cmake --build build --target project_oberon_kernel   # full 14-module Project Oberon (--int32)
+cmake --build build --target run_project_oberon      # add -DKERNEL_QEMU_DISPLAY=cocoa for a window
+```
+
+Linux hosts:
 
 ```bash
 # x86-64 kernel (default)

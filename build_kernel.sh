@@ -7,6 +7,8 @@
 # Options:
 #   -a, --arch ARCH     Target architecture: x86_64 (default) or aarch64
 #   -o, --output FILE   Output file (default: kernel_<arch>.iso / kernel_<arch>.elf)
+#   -B, --build-dir DIR CMake build tree with oberonc + the bare runtime for ARCH
+#                       (default: build/; on macOS, build_x86_64/ for x86_64)
 #   --iso               Force ISO output even if grub-mkrescue is unavailable
 #   --elf               Produce a raw ELF only (skip ISO creation)
 #   --debug-info        Emit DWARF debug info (passes --debugger-tune=gdb --dwarf-version=4 to llc)
@@ -22,7 +24,7 @@
 # The first .Mod file is the "main" module (provides oberon_main).
 # Any additional .Mod files are compiled as dependency modules (--init-only).
 #
-# Requirements:
+# Requirements (Linux host):
 #   - cmake-built tree at ./build/  (cmake -B build && cmake --build build)
 #   - llc-14 (x86_64) or llc (aarch64)
 #   - ld (binutils, same arch as target)
@@ -30,6 +32,13 @@
 #   - aarch64-linux-gnu-{g++,ld} (for aarch64 cross-compilation)
 #   - gdb (optional, for --gdb)
 #   - qemu-system-{x86_64,aarch64} (for --run)
+#
+# Requirements (macOS host, cross-compiling with Homebrew LLVM 18):
+#   - a build tree configured for the target architecture:
+#       cmake -B build -DKERNEL_ARCH=apple-aarch64
+#       cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64
+#   - llc and ld.lld from $LLVM18_BIN (default /opt/homebrew/opt/llvm@18/bin)
+#   - no ISO is built; QEMU boots the ELF directly (-kernel)
 
 set -euo pipefail
 
@@ -47,6 +56,8 @@ QMP_SOCK=0
 MONITOR_SOCK=0
 MAIN_MOD=""
 DEP_MODS=()
+BUILD_DIR=""
+HOST_OS="$(uname -s)"
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -55,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -a|--arch)    ARCH="$2"; shift 2 ;;
         -o|--output)  OUTPUT="$2"; shift 2 ;;
+        -B|--build-dir) BUILD_DIR="$2"; shift 2 ;;
         --iso)        FORCE_ISO=1; shift ;;
         --elf)        ELF_ONLY=1; shift ;;
         --debug-info) DEBUG_INFO=1; shift ;;
@@ -94,8 +106,15 @@ esac
 # Locate tools
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build"
+if [[ -z "$BUILD_DIR" ]]; then
+    if [[ "$HOST_OS" == "Darwin" && "$ARCH" == "x86_64" ]]; then
+        BUILD_DIR="$SCRIPT_DIR/build_x86_64"
+    else
+        BUILD_DIR="$SCRIPT_DIR/build"
+    fi
+fi
 OBERONC="$BUILD_DIR/oberonc"
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 if [[ ! -x "$OBERONC" ]]; then
     echo "error: compiler not found at $OBERONC"
@@ -103,16 +122,34 @@ if [[ ! -x "$OBERONC" ]]; then
     exit 1
 fi
 
-# llc: prefer llc-14 for x86_64 (matches LLVM version used to build oberonc)
+# On macOS the build tree must have been configured for this architecture
+# (the apple-* CMake blocks build the runtime and boot stub for one target).
+if [[ "$HOST_OS" == "Darwin" ]]; then
+    CONFIGURED_ARCH="$(sed -n 's/^KERNEL_ARCH:[A-Z]*=//p' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null)"
+    if [[ "$CONFIGURED_ARCH" != "apple-$ARCH" ]]; then
+        echo "error: $BUILD_DIR is configured for KERNEL_ARCH='$CONFIGURED_ARCH'"
+        echo "  Run: cmake -B $BUILD_DIR -DKERNEL_ARCH=apple-$ARCH"
+        exit 1
+    fi
+    # Use the same LLVM 18 toolchain that CMake built the runtime with.
+    CACHED_LLVM_BIN="$(sed -n 's/^LLVM18_BIN:[A-Z]*=//p' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null)"
+    LLVM18_BIN="${CACHED_LLVM_BIN:-${LLVM18_BIN:-/opt/homebrew/opt/llvm@18/bin}}"
+fi
+
+# llc: Homebrew LLVM 18 on macOS; otherwise prefer llc-14 (matches the LLVM
+# version used to build oberonc on Debian/Ubuntu)
 find_llc() {
+    if [[ "$HOST_OS" == "Darwin" ]]; then
+        echo "$LLVM18_BIN/llc"; return
+    fi
     for c in llc-14 llc; do
         if command -v "$c" &>/dev/null; then echo "$c"; return; fi
     done
     echo ""
 }
 LLC="$(find_llc)"
-if [[ -z "$LLC" ]]; then
-    echo "error: llc not found (install llvm-14 or llvm)"; exit 1
+if [[ -z "$LLC" ]] || ! command -v "$LLC" &>/dev/null; then
+    echo "error: llc not found (install llvm-14 or llvm, or llvm@18 via Homebrew)"; exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -124,7 +161,7 @@ MAIN_NAME="$(basename "$MAIN_STEM")"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-ELF_OUT="${OUTPUT:-$SCRIPT_DIR/build/kernel_${ARCH}.elf}"
+ELF_OUT="${OUTPUT:-$BUILD_DIR/kernel_${ARCH}.elf}"
 ISO_OUT="${ELF_OUT%.elf}.iso"
 
 # ---------------------------------------------------------------------------
@@ -153,7 +190,7 @@ assemble_ll() {
     local debug_flags=""
     [[ "$DEBUG_INFO" -eq 1 ]] && debug_flags="--debugger-tune=gdb --dwarf-version=4"
     # shellcheck disable=SC2086
-    "$LLC" --march="$LLC_ARCH" --filetype=obj \
+    "$LLC" --march="$LLC_ARCH" $LLC_TRIPLE --filetype=obj \
            --relocation-model=static \
            $debug_flags \
            "$llfile" -o "$objfile" >&2
@@ -181,15 +218,31 @@ aarch64)
     RUNTIME_LIB="$BUILD_DIR/liboberon_runtime_bare.a"
     ;;
 esac
+LLC_TRIPLE=""
+RUNTIME_TARGETS=(boot_bare oberon_runtime_bare)
+
+# macOS: cross-compile for <arch>-none-elf and link with ld.lld (Apple's ld
+# cannot produce ELF). The apple-* CMake blocks' `kernel_runtime` target builds
+# just boot.o and the runtime archive.
+if [[ "$HOST_OS" == "Darwin" ]]; then
+    LLC_TRIPLE="-mtriple=${ARCH}-none-elf"
+    LINKER="$LLVM18_BIN/ld.lld"
+    LD_EMUL=""
+    BOOT_OBJ="$BUILD_DIR/boot.o"
+    RUNTIME_TARGETS=(kernel_runtime)
+fi
 
 # ---------------------------------------------------------------------------
 # Make sure the cmake-built boot+runtime artefacts are up to date
 # ---------------------------------------------------------------------------
 echo "==> Building boot stub and bare-metal runtime for $ARCH..."
-cmake --build "$BUILD_DIR" \
-      --target boot_bare oberon_runtime_bare \
-      -- -j"$(nproc)" 2>&1 \
-    | grep -E 'Built target|error:' || true
+if ! cmake --build "$BUILD_DIR" --target "${RUNTIME_TARGETS[@]}" -j "$JOBS" \
+        > "$WORK_DIR/cmake.log" 2>&1; then
+    cat "$WORK_DIR/cmake.log" >&2
+    echo "error: building the boot stub / runtime failed"
+    exit 1
+fi
+grep -E 'Built target' "$WORK_DIR/cmake.log" || true
 
 if [[ ! -f "$BOOT_OBJ" ]]; then
     echo "error: boot object not found: $BOOT_OBJ"
@@ -209,7 +262,7 @@ echo ""
 echo "==> Compiling Oberon modules..."
 
 # Dependency modules (--init-only: emit ModName_init instead of oberon_main)
-for depmod in "${DEP_MODS[@]}"; do
+for depmod in ${DEP_MODS[@]+"${DEP_MODS[@]}"}; do  # bash 3.2: empty array + set -u
     ll="$(compile_mod "$depmod" "--init-only")"
     obj="$(assemble_ll "$ll")"
     OBJ_FILES+=("$obj")
@@ -225,13 +278,21 @@ OBJ_FILES+=("$obj")
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> Linking $ARCH ELF kernel → $ELF_OUT..."
+# Remove any previous image so a failed link can never leave a stale kernel.
+rm -f "$ELF_OUT"
+LINK_STATUS=0
 # shellcheck disable=SC2086
 "$LINKER" $LD_EMUL \
     -T "$LINKER_SCRIPT" \
     "$BOOT_OBJ" \
     "${OBJ_FILES[@]}" \
     "$RUNTIME_LIB" \
-    -o "$ELF_OUT" 2>&1 | grep -v "RWX permissions" || true
+    -o "$ELF_OUT" > "$WORK_DIR/link.log" 2>&1 || LINK_STATUS=$?
+grep -v "RWX permissions" "$WORK_DIR/link.log" >&2 || true
+if [[ "$LINK_STATUS" -ne 0 ]]; then
+    echo "error: linking $ELF_OUT failed (exit $LINK_STATUS)"
+    exit 1
+fi
 
 echo "    ELF: $ELF_OUT  ($(du -h "$ELF_OUT" | cut -f1))"
 
@@ -240,7 +301,12 @@ echo "    ELF: $ELF_OUT  ($(du -h "$ELF_OUT" | cut -f1))"
 # ---------------------------------------------------------------------------
 # Create bootable ISO (x86_64 via GRUB2 + Multiboot2)
 # ---------------------------------------------------------------------------
-if [[ "$ARCH" == "x86_64" ]]; then
+if [[ "$ARCH" == "x86_64" && "$HOST_OS" == "Darwin" ]]; then
+    echo ""
+    echo "==> x86_64 ELF ready (macOS: no ISO packaging — QEMU boots it via PVH):"
+    echo "    qemu-system-x86_64 -kernel $ELF_OUT \\"
+    echo "        -serial stdio -vga std -no-reboot"
+elif [[ "$ARCH" == "x86_64" ]]; then
     if ! command -v grub-mkrescue &>/dev/null; then
         echo ""
         echo "warning: grub-mkrescue not found — skipping ISO creation"
@@ -293,7 +359,7 @@ GRUBCFG
 elif [[ "$ARCH" == "aarch64" ]]; then
     echo ""
     echo "==> AArch64 ELF ready (no ISO packaging — boot directly with QEMU):"
-    echo "    qemu-system-aarch64 -M virt -cpu cortex-a57 \\"
+    echo "    qemu-system-aarch64 -M virt -cpu cortex-a57 -device ramfb \\"
     echo "        -kernel $ELF_OUT \\"
     echo "        -serial stdio -display none -no-reboot"
 fi
@@ -308,13 +374,17 @@ if [[ "$RUN_QEMU" -eq 1 ]]; then
     # Build QEMU command line
     if [[ "$ARCH" == "x86_64" ]]; then
         QEMU_BIN="qemu-system-x86_64"
-        QEMU_KERNEL_ARGS=(-cdrom "$ISO_OUT")
+        if [[ -f "$ISO_OUT" ]]; then
+            QEMU_KERNEL_ARGS=(-cdrom "$ISO_OUT")
+        else
+            QEMU_KERNEL_ARGS=(-kernel "$ELF_OUT")   # PVH direct boot
+        fi
         # -vga std exposes the Bochs VBE extension needed by the display driver.
         # Do NOT use -display none here: the user wants to see the graphical output.
         QEMU_BASE_ARGS=(-serial stdio -vga std -no-reboot -m 128M)
     else
         QEMU_BIN="qemu-system-aarch64"
-        QEMU_KERNEL_ARGS=(-M virt -cpu cortex-a57 -kernel "$ELF_OUT")
+        QEMU_KERNEL_ARGS=(-M virt -cpu cortex-a57 -device ramfb -kernel "$ELF_OUT")
         QEMU_BASE_ARGS=(-serial stdio -display none -no-reboot)
     fi
 

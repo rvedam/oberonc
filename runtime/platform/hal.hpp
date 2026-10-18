@@ -6,6 +6,11 @@
 
 #include "../compat_stdint.hpp"
 
+// Project Oberon screen geometry, shared by framebuffer.cpp and every
+// platform's display device (VBE mode, ramfb configuration).
+constexpr int FB_W = 1024;
+constexpr int FB_H = 768;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,11 +26,16 @@ int  hal_getc();             // read one char; -1 if none available
 // No-op if no real display device was successfully configured.
 void hal_display_flush();
 
+// Shared (runtime/framebuffer.cpp): expand the 1bpp shadow buffer into an
+// FB_W×FB_H XRGB8888 frame buffer (row stride FB_W pixels), redrawing only
+// what changed since the previous call.
+void fb_expand_xrgb(uint32_t* dst);
+
 // Called by src/codegen.cpp's HAL pseudo-module (IMPORT HAL in Oberon
-// source) — see Display.Mod/Kernel.Mod. HAL_FramebufferBase is genuinely
-// per-platform (implemented in platform/<arch>/hal.cpp: x86_64 returns the
-// existing SHADOW_BASE; aarch64 returns a real static buffer, since aarch64
-// has no display device backing the RISC5-era literal 0x0E7F00 at all).
+// source) — see Display.Mod/Kernel.Mod. HAL_FramebufferBase returns the
+// shared 1bpp shadow buffer in BSS (runtime/framebuffer.cpp); the RISC5-era
+// literal 0x0E7F00 is not usable RAM on either platform (PC BIOS area on
+// x86_64, unmapped on QEMU virt).
 // HAL_HeapOrigin/HAL_MemLimit are implemented once, shared, in
 // oberon_runtime_bare.cpp — their correctness depends on being defined
 // relative to the exact same static heap array Oberon_NEW bump-allocates

@@ -76,20 +76,6 @@ int hal_getc() {
 #endif
 }
 
-// Shadow framebuffer: 1bpp, 1024×768 packed. Stride = 1024/8 = 128 bytes.
-// Same layout Display.Mod already assumes on x86_64 (see
-// platform/x86_64/hal.cpp's SHADOW_BASE comment). Unlike x86_64, aarch64 has
-// no real backing memory at the RISC5-era literal address 0x0E7F00 (QEMU
-// virt's RAM starts at 0x40000000), so this lives in our own BSS instead —
-// Display.Mod now reads the address via HAL.FramebufferBase() rather than a
-// hardcoded literal (see src/codegen.cpp's HAL pseudo-module), so this is a
-// transparent substitution from the Oberon source's point of view.
-static constexpr int FB_W = 1024, FB_H = 768;
-alignas(16) static uint8_t shadow_fb[FB_H][FB_W / 8]; // 98,304 bytes, zeroed by boot stub (BSS)
-
-int64_t HAL_FramebufferBase() {
-    return reinterpret_cast<int64_t>(&shadow_fb[0][0]);
-}
 
 // ---------------------------------------------------------------------------
 // Timer: the generic timer's virtual counter (CNTVCT_EL0 / CNTFRQ_EL0)
@@ -150,12 +136,6 @@ static bool streq(const char* a, const char* b) {
 alignas(4096) static uint32_t ramfb_pixels[FB_H][FB_W];   // XRGB8888, 3 MiB BSS
 static bool ramfb_ok = false;
 
-// Change detection and expansion for hal_display_flush: the shadow words
-// last drawn, and each byte's 8 pixels (bit k = pixel k).
-static uint32_t drawn[FB_H][FB_W / 32];
-static bool     drawn_valid = false;
-static uint32_t byte_pixels[256][8];
-
 static void ramfb_init() {
     // The file directory: a big-endian entry count followed by the entries.
     static struct { uint32_t count; FwCfgFile files[64]; } dir;
@@ -175,35 +155,15 @@ static void ramfb_init() {
         cfg.height = be32(FB_H);
         cfg.stride = be32(FB_W * 4);
         ramfb_ok = fw_cfg_dma(be16(dir.files[i].select), DMA_CTL_WRITE, &cfg, sizeof cfg);
-        for (int b = 0; b < 256; ++b)
-            for (int bit = 0; bit < 8; ++bit)
-                byte_pixels[b][bit] = (b >> bit) & 1 ? 0x00FFFFFFu : 0x00000000u;
         hal_puts(ramfb_ok ? "[ramfb: 1024x768]\n" : "[ramfb: configuration failed]\n");
         return;
     }
     hal_puts("[ramfb: none (run QEMU with -device ramfb)]\n");
 }
 
-// Project Oberon's frame buffer has y = 0 at the bottom (the RISC5 video
-// controller scans it in reverse); bit k of each 32-bit word is pixel x+k.
-// Only 32-pixel words that changed since the last flush are redrawn.
+// The shadow buffer's layout and change tracking live in framebuffer.cpp.
 void hal_display_flush() {
-    if (!ramfb_ok) return;
-    for (int row = 0; row < FB_H; ++row) {
-        const auto* src = reinterpret_cast<const uint32_t*>(shadow_fb[row]);
-        uint32_t* line = ramfb_pixels[FB_H - 1 - row];
-        for (int w = 0; w < FB_W / 32; ++w) {
-            uint32_t word = src[w];
-            if (drawn_valid && word == drawn[row][w]) continue;
-            drawn[row][w] = word;
-            uint32_t* dst = line + w * 32;
-            for (int byte = 0; byte < 4; ++byte, dst += 8) {
-                const uint32_t* px = byte_pixels[(word >> (8 * byte)) & 0xFF];
-                for (int k = 0; k < 8; ++k) dst[k] = px[k];
-            }
-        }
-    }
-    drawn_valid = true;
+    if (ramfb_ok) fb_expand_xrgb(&ramfb_pixels[0][0]);
 }
 
 // ---------------------------------------------------------------------------

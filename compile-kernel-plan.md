@@ -302,7 +302,7 @@ Fix in this order to unblock the most downstream modules earliest:
 
 ---
 
-## Bug 5 — Boot-time hardcoded RISC5 physical addresses (Kernel.Init, Display.Mod) — 🔧 IN PROGRESS (2026-07-21)
+## Bug 5 — Boot-time hardcoded RISC5 physical addresses (Kernel.Init, Display.Mod) — ✅ FIXED (d5d500c)
 
 All 14 modules now compile and link (see Status above), but the original Wirth source hardcodes several RISC5-hardware physical addresses as literal constants, which `oberonc` compiles literally (no compile-time-constant requirement on `SYSTEM.PUT`/`GET` addresses — they're generic runtime `i64` values, `codegen_gen.cpp`). These addresses only happen to be valid on x86_64/QEMU by luck of memory layout, and even there, one boot-time code path has never actually been exercised on either architecture.
 
@@ -344,7 +344,7 @@ Add a new `HAL` pseudo-module (no `.Mod` source file, exactly like the existing 
 
 ---
 
-## Bug 6 — aarch64 has no display device at all — 🔧 PLANNED (2026-07-21)
+## Bug 6 — aarch64 has no display device at all — ✅ FIXED (ea5f19e, ramfb via fw_cfg DMA)
 
 ### Symptom
 
@@ -525,7 +525,7 @@ New `hal_display_flush()` (replacing today's no-op stub): blit `shadow_fb` (1bpp
 
 ---
 
-## Bug 7 — No x86_64 cross-compilation path from an Apple Silicon host — 🔧 PLANNED (2026-07-21)
+## Bug 7 — No x86_64 cross-compilation path from an Apple Silicon host — ✅ FIXED (2026-10-15)
 
 ### Symptom
 
@@ -552,7 +552,9 @@ Mirror what the `apple-aarch64` block already does for ARM (Homebrew `clang --ta
 
 **Files to change:** `CMakeLists.txt` (new `apple-x86_64` block + `project_oberon_kernel` target for it), `build_kernel.sh` (x86_64 linker/assembler path).
 
-**Verification:** `cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64 && cmake --build build_x86_64 --target project_oberon_kernel` produces a valid ELF (`file` reports `ELF 64-bit LSB executable, x86-64`); boot under `qemu-system-x86_64` per `build_kernel.sh`'s existing `--run` instructions (`-vga std` for the Bochs VBE display path Bug 5/x86_64's `HAL_FramebufferBase` already supports unchanged).
+**Resolution (2026-10-15):** the `apple-aarch64` block became a single `apple-(aarch64|x86_64)` block (Homebrew LLVM 18 `clang --target=<arch>-none-elf`, `llc -mtriple`, `ld.lld`); `build_kernel.sh` got a matching Darwin path (`-B/--build-dir`, per-arch build trees checked against `KERNEL_ARCH`, PVH `-kernel` boot instead of a GRUB ISO). Booting the full kernel on x86_64 also needed: the shadow frame buffer moved out of the PC BIOS window (0E7F00H) into BSS, shared with AArch64 in `runtime/framebuffer.cpp` (y-flip, 32bpp VBE); SSE enabled and an IDT that reports exceptions in `boot.S`; a TSC timer calibrated against the PIT for `HAL_Time`; `floor`/`floorf` in the bare runtime (no SSE4.1 on QEMU's default CPU). Both architectures now render pixel-identical desktops — which exposed a `Fonts.This` dependency on RISC5's low addresses (null-glyph width read from an address byte), fixed in `Fonts.Mod`.
+
+**Original verification plan:** `cmake -B build_x86_64 -DKERNEL_ARCH=apple-x86_64 && cmake --build build_x86_64 --target project_oberon_kernel` produces a valid ELF (`file` reports `ELF 64-bit LSB executable, x86-64`); boot under `qemu-system-x86_64` per `build_kernel.sh`'s existing `--run` instructions (`-vga std` for the Bochs VBE display path Bug 5/x86_64's `HAL_FramebufferBase` already supports unchanged).
 
 ---
 
@@ -575,3 +577,19 @@ Limitations:
 - **Disk geometry**: sector-map size (`Kernel.mapsize`), reserved sectors, how the size limit is communicated to `Kernel.InitSecMap`/`AllocSector`.
 - **Tooling**: a host-side tool to create images and add/extract files (B-tree with multiple pages, extension sectors), replacing `mkpodisk.py`'s limits.
 - **Module loading**: whether the file system should also hold compiled modules so `Modules.Load` (currently disabled; everything is statically linked) can work again.
+
+---
+
+## Backlog: x86_64 boot stub hardening (from the Bug 7 code review) — 📋 TODO (added 2026-10-17)
+
+### Stack has no guard (review item 8) — keep in mind when writing tests
+
+`runtime/boot/x86_64/boot.S` puts the 1 MiB stack in `.bss` directly after the page tables (`pml4`, `pdpt`, `pd0`–`pd3`), with no unmapped guard page, and the IDT has no IST stack for `#PF`/`#DF`. An overflow (deep Project Oberon recursion with 1 KiB sector buffers on the stack was the reason for growing it) silently overwrites the live 2 MiB mappings. The result is random corruption or a triple fault, never the `*** exception` report.
+
+**While writing kernel tests:** treat unexplained corruption, spontaneous resets or a silent QEMU exit (`-no-reboot`) on x86_64 as a possible stack overflow. Checks: compare RSP with `_stack_bot` from the QEMU monitor (`info registers`), or temporarily grow the stack and see whether the symptom moves. AArch64 has the same layout question; check its boot.S too.
+
+Fix options: put the stack below the page tables, separated by an unmapped 4 KiB page (this needs 4 KiB mappings around it instead of a 2 MiB huge page), and/or give `#DF` (and `#PF`) an IST stack in a TSS so the overflow is reported instead of triple-faulting.
+
+### Hand-written exception stubs (review item 10)
+
+`boot.S` lists 32 `ISR_NOERR`/`ISR_ERR` lines and an `isr_table` that repeats the same 32 labels, so they can drift apart. Generate both with assembler loops instead: `.irp` (or `.rept` + `.altmacro`) over vectors 0–31, choosing the error-code variant for vectors 8, 10–14, 17, 21, 29 and 30.

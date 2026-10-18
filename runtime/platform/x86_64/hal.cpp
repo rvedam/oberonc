@@ -124,10 +124,9 @@ static uint32_t pci_find_bar0(uint16_t vendor, uint16_t device) {
 // ---------------------------------------------------------------------------
 // Bochs VBE (I/O ports 0x1CE / 0x1CF) — available on QEMU -vga std
 //
-// Display.Mod uses a 1bpp monochrome framebuffer at physical 0x0E7F00 (the
-// shadow buffer in BSS, an identity-mapped RAM page).  We configure a real
-// 8bpp VBE mode at the same logical 1024×768 resolution, discover the VBE
-// linear framebuffer via PCI, and convert shadow→LFB in hal_display_flush().
+// Display.Mod draws into the shared 1bpp shadow buffer (framebuffer.cpp).
+// We set a 1024×768×32bpp VBE mode, find its linear framebuffer through PCI,
+// and let fb_expand_xrgb copy changes into it from hal_display_flush().
 // ---------------------------------------------------------------------------
 
 static constexpr uint16_t VBE_IDX  = 0x1CE;
@@ -142,19 +141,8 @@ static inline uint16_t vbe_read(uint16_t idx) {
     return inw(VBE_DATA);
 }
 
-// Shadow framebuffer: 1bpp, 1024×768 packed.  Stride = 1024/8 = 128 bytes.
-// Laid out identically to Project Oberon PO2013.
-static constexpr uint32_t SHADOW_BASE = 0x0E7F00;
-static constexpr int      FB_W        = 1024;
-static constexpr int      FB_H        = 768;
-
-// Display.Mod now reads its framebuffer base via HAL.FramebufferBase()
-// instead of a hardcoded literal (see src/codegen.cpp's HAL pseudo-module).
-// x86_64 returns the same address it always used — byte-identical behavior.
-int64_t HAL_FramebufferBase() { return static_cast<int64_t>(SHADOW_BASE); }
-
-// Pointer to the 8bpp VBE linear framebuffer (null if VBE unavailable)
-static volatile uint8_t* vbe_lfb = nullptr;
+// The 32bpp VBE linear framebuffer (null if VBE unavailable)
+static uint32_t* vbe_lfb = nullptr;
 
 static void vbe_init() {
     // Verify the Bochs VBE ID tag is present (0xB0C0..0xB0C5)
@@ -164,15 +152,65 @@ static void vbe_init() {
     vbe_write(0x4, 0x0);      // disable VBE
     vbe_write(0x1, FB_W);     // XRES
     vbe_write(0x2, FB_H);     // YRES
-    vbe_write(0x3, 8);        // BPP = 8 bits per pixel
+    vbe_write(0x3, 32);       // BPP = 32 (XRGB8888)
     vbe_write(0x4, 0x41);     // enable + linear framebuffer mode
 
     // Locate the VBE LFB via PCI BAR0 of the Bochs VGA device (0x1234:0x1111)
     uint32_t bar0 = pci_find_bar0(0x1234, 0x1111);
     if (bar0 == 0) return;
 
-    vbe_lfb = reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(bar0));
+    vbe_lfb = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(bar0));
 }
+
+// ---------------------------------------------------------------------------
+// Timer: the TSC, calibrated once against the PIT (1.193182 MHz)
+// ---------------------------------------------------------------------------
+
+static uint64_t tsc_per_ms = 1;
+static uint64_t tsc_boot;                     // TSC at timer_init: HAL_Time's zero
+
+static inline uint64_t rdtsc() {
+    uint32_t lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (uint64_t(hi) << 32) | lo;
+}
+
+static uint16_t pit_read() {
+    outb(0x43, 0x00);                         // latch channel 0
+    uint8_t lo = inb(0x40), hi = inb(0x40);
+    return static_cast<uint16_t>(lo | (hi << 8));
+}
+
+static void timer_init() {
+    outb(0x43, 0x34);                         // channel 0, lo/hi byte, mode 2
+    outb(0x40, 0x00); outb(0x40, 0x00);       // reload 65536 (~55 ms period)
+    // Count 11932 PIT ticks (10 ms) while watching the TSC; the counter runs
+    // down, so elapsed ticks are (previous - current) mod 65536. A PIT that
+    // never counts (absent or gated off) must not hang the boot: give up
+    // after MAX_POLLS reads (each is ~1 µs of port I/O, so ~1 s) and assume
+    // a 1 GHz TSC.
+    constexpr uint32_t TICKS = 11932;
+    constexpr uint32_t MAX_POLLS = 1000000;
+    uint16_t prev = pit_read();
+    uint32_t elapsed = 0;
+    uint64_t t0 = rdtsc();
+    for (uint32_t polls = 0; elapsed < TICKS && polls < MAX_POLLS; ++polls) {
+        uint16_t now = pit_read();
+        elapsed += static_cast<uint16_t>(prev - now);
+        prev = now;
+    }
+    uint64_t t1 = rdtsc();
+    tsc_boot = t1;
+    if (elapsed < TICKS) {
+        hal_puts("[timer: PIT not counting; assuming a 1 GHz TSC]\n");
+        tsc_per_ms = 1000000;
+        return;
+    }
+    tsc_per_ms = (t1 - t0) * 1193182 / (uint64_t(elapsed) * 1000);
+    if (tsc_per_ms == 0) tsc_per_ms = 1;
+}
+
+int64_t HAL_Time() { return static_cast<int64_t>((rdtsc() - tsc_boot) / tsc_per_ms); }
 
 // ---------------------------------------------------------------------------
 // HAL implementation
@@ -190,6 +228,7 @@ void hal_init() {
     uart_init();
     // Initialise x87 FPU (needed for double arithmetic in Out_Real)
     asm volatile("fninit");
+    timer_init();
     vbe_init();
     // Report VBE status on serial for debugging
     if (vbe_lfb) {
@@ -222,26 +261,21 @@ int hal_getc() {
 }
 
 // ---------------------------------------------------------------------------
-// hal_display_flush — convert 1bpp shadow buffer → 8bpp VBE LFB
-//
-// The shadow buffer (Project Oberon layout):
-//   base = 0x0E7F00, stride = 128 bytes, 32 pixels per word, LSB = leftmost.
-// The VBE LFB (8bpp):
-//   stride = 1024 bytes, 1 byte per pixel, 0x00 = black, 0xFF = white.
+// Display and exceptions
 // ---------------------------------------------------------------------------
+
+// The shadow buffer's layout and change tracking live in framebuffer.cpp.
 void hal_display_flush() {
-    if (!vbe_lfb) return;
+    if (vbe_lfb) fb_expand_xrgb(vbe_lfb);
+}
 
-    const auto* shadow = reinterpret_cast<const uint32_t*>(
-        static_cast<uintptr_t>(SHADOW_BASE));
-
-    for (int y = 0; y < FB_H; ++y) {
-        for (int wx = 0; wx < FB_W / 32; ++wx) {
-            // stride in 32-bit words = 128 bytes / 4 = 32 words per row
-            uint32_t word = shadow[y * 32 + wx];
-            volatile uint8_t* dst = vbe_lfb + y * FB_W + wx * 32;
-            for (int bit = 0; bit < 32; ++bit)
-                dst[bit] = (word >> bit) & 1 ? 0xFF : 0x00;
-        }
-    }
+// Called by the IDT stubs in boot.S for every CPU exception: report and stop.
+extern "C" [[noreturn]] void hal_exception(uint64_t vector, uint64_t error,
+                                           uint64_t rip, uint64_t cr2) {
+    hal_puts("\n*** exception "); hal_put_hex(vector);
+    hal_puts(" error="); hal_put_hex(error);
+    hal_puts(" RIP="); hal_put_hex(rip);
+    hal_puts(" CR2="); hal_put_hex(cr2);
+    hal_puts("\n");
+    hal_halt();
 }

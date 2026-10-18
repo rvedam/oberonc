@@ -81,7 +81,11 @@ BEGIN F := root;
         a0 := SYSTEM.ADR(F.raster);
         SYSTEM.PUT(a0, 0X); SYSTEM.PUT(a0+1, 0X); SYSTEM.PUT(a0+2, 0X); SYSTEM.PUT(a0+3, 0X); SYSTEM.PUT(a0+4, 0X);
         (*null pattern for characters not in a run*)
-        INC(a0, 2); a := a0+3; j := 0; k := 0; m := 0;
+        (*oberonc: GetPat reads dx from pa-3. With a0 = raster+2 (original
+          INC(a0, 2)) that is raster-1, the top byte of the address in T[127]:
+          0 on RISC5, but 40H on AArch64, where RAM starts at 40000000H. With
+          a0 = raster+3 all five pattern bytes are the zeroed raster[0..4]*)
+        INC(a0, 3); a := a0+3; j := 0; k := 0; m := 0;
         WHILE k < NofRuns DO
           WHILE (m < run[k].beg) & (m < 128) DO F.T[m] := a0; INC(m) END;
           WHILE (m < run[k].end) & (m < 128) DO

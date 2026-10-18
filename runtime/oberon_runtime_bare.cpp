@@ -75,6 +75,21 @@ void* memset(void* dst, int c, size_t n) {
     return dst;
 }
 
+// floor/floorf: FLOOR(x) compiles to llvm.floor, which x86-64 without SSE4.1
+// lowers to a library call. Values beyond ±2^52 (±2^23 for float) are
+// already integral; NaN and infinities pass through unchanged.
+double floor(double x) {
+    if (!(x > -4503599627370496.0 && x < 4503599627370496.0)) return x;
+    double t = static_cast<double>(static_cast<int64_t>(x));
+    return t > x ? t - 1.0 : t;
+}
+
+float floorf(float x) {
+    if (!(x > -8388608.0f && x < 8388608.0f)) return x;
+    float t = static_cast<float>(static_cast<int32_t>(x));
+    return t > x ? t - 1.0f : t;
+}
+
 // ---------------------------------------------------------------------------
 // Out module
 // ---------------------------------------------------------------------------

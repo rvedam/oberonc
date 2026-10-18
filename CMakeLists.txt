@@ -142,8 +142,8 @@ add_custom_target(generate_hello_ll
 
 # ---- Architecture selection for bare-metal targets --------------------------
 set(KERNEL_ARCH "x86_64" CACHE STRING
-    "Target architecture for bare-metal kernel (x86_64, aarch64, or apple-aarch64)")
-set_property(CACHE KERNEL_ARCH PROPERTY STRINGS x86_64 aarch64 apple-aarch64)
+    "Target architecture for bare-metal kernel (x86_64, aarch64, apple-aarch64, apple-x86_64)")
+set_property(CACHE KERNEL_ARCH PROPERTY STRINGS x86_64 aarch64 apple-aarch64 apple-x86_64)
 message(STATUS "Bare-metal kernel architecture: ${KERNEL_ARCH}")
 
 if(KERNEL_ARCH STREQUAL "x86_64")
@@ -151,10 +151,11 @@ if(KERNEL_ARCH STREQUAL "x86_64")
     # Runtime library — host compiler is correct for x86_64
     add_library(oberon_runtime_bare STATIC
         runtime/oberon_runtime_bare.cpp
-        runtime/platform/x86_64/hal.cpp)
+        runtime/platform/x86_64/hal.cpp
+        runtime/framebuffer.cpp)
     target_include_directories(oberon_runtime_bare PUBLIC runtime)
     target_compile_options(oberon_runtime_bare PRIVATE
-        -ffreestanding -mno-red-zone -O2)
+        -ffreestanding -mno-red-zone -O2 -Wall -Wextra -Wpedantic)
 
     # Boot stub — assembled by the host assembler
     add_library(boot_bare OBJECT runtime/boot/x86_64/boot.S)
@@ -180,23 +181,36 @@ elseif(KERNEL_ARCH STREQUAL "aarch64")
     set(AARCH64_LD  "aarch64-linux-gnu-ld"   CACHE STRING "AArch64 linker")
 
     # Runtime objects — must be built with the cross-compiler
+    set(AARCH64_CXXFLAGS -std=c++20 -ffreestanding -O2 -Wall -Wextra -Wpedantic)
+    set(AARCH64_HEADERS
+        ${CMAKE_SOURCE_DIR}/runtime/compat_stdint.hpp
+        ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp)
     add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
-        COMMAND ${AARCH64_CXX} -std=c++20 -ffreestanding -O2
+        COMMAND ${AARCH64_CXX} ${AARCH64_CXXFLAGS}
                 -I${CMAKE_SOURCE_DIR}/runtime
                 -c ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
                 -o ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp ${AARCH64_HEADERS}
         COMMENT "Cross-compiling AArch64 bare runtime")
 
     add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/hal.o
-        COMMAND ${AARCH64_CXX} -std=c++20 -ffreestanding -O2
+        COMMAND ${AARCH64_CXX} ${AARCH64_CXXFLAGS}
                 -I${CMAKE_SOURCE_DIR}/runtime
                 -c ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
                 -o ${CMAKE_BINARY_DIR}/hal.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp ${AARCH64_HEADERS}
         COMMENT "Cross-compiling AArch64 HAL")
+
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/framebuffer.o
+        COMMAND ${AARCH64_CXX} ${AARCH64_CXXFLAGS}
+                -I${CMAKE_SOURCE_DIR}/runtime
+                -c ${CMAKE_SOURCE_DIR}/runtime/framebuffer.cpp
+                -o ${CMAKE_BINARY_DIR}/framebuffer.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/framebuffer.cpp ${AARCH64_HEADERS}
+        COMMENT "Cross-compiling AArch64 shared framebuffer")
 
     add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
@@ -204,8 +218,10 @@ elseif(KERNEL_ARCH STREQUAL "aarch64")
                 ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
                 ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
                 ${CMAKE_BINARY_DIR}/hal.o
+                ${CMAKE_BINARY_DIR}/framebuffer.o
         DEPENDS ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
                 ${CMAKE_BINARY_DIR}/hal.o
+                ${CMAKE_BINARY_DIR}/framebuffer.o
         COMMENT "Archiving AArch64 runtime library")
 
     # Boot stub — must be assembled by the cross-assembler
@@ -230,54 +246,80 @@ elseif(KERNEL_ARCH STREQUAL "aarch64")
                 ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
         COMMENT "Linking AArch64 bare-metal kernel → kernel_aarch64.elf")
 
-elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
+elseif(KERNEL_ARCH MATCHES "^apple-(aarch64|x86_64)$")
 
-    # Apple Silicon: LLVM 18 from Homebrew, clang targeting aarch64-none-elf,
-    # ld.lld for ELF output. The resulting kernel runs on QEMU virt machine.
+    # Apple Silicon (or Intel Mac) host, cross-compiling with Homebrew LLVM 18:
+    # clang --target=<arch>-none-elf for the runtime and boot stub, llc for
+    # Oberon IR, ld.lld for ELF output. The kernels run under QEMU:
+    #   apple-aarch64: qemu-system-aarch64 -M virt (PL011 UART, ramfb display)
+    #   apple-x86_64:  qemu-system-x86_64 PVH boot (COM1 UART, Bochs VBE display)
+    set(BARE_ARCH "${CMAKE_MATCH_1}")
 
     set(LLVM18_BIN "/opt/homebrew/opt/llvm@18/bin"
-        CACHE PATH "LLVM 18 bin directory (Homebrew Apple Silicon)")
+        CACHE PATH "LLVM 18 bin directory (Homebrew)")
+    set(BARE_CXX "${LLVM18_BIN}/clang++" CACHE STRING "Bare-metal C++ compiler")
+    set(BARE_CC  "${LLVM18_BIN}/clang"   CACHE STRING "Bare-metal C compiler / assembler")
+    set(BARE_LD  "${LLVM18_BIN}/ld.lld"  CACHE STRING "ELF linker")
+    set(BARE_AR  "${LLVM18_BIN}/llvm-ar" CACHE STRING "Archive tool")
+    set(BARE_LLC "${LLVM18_BIN}/llc"     CACHE STRING "LLVM static compiler")
 
-    set(APPLE_AARCH64_CXX "${LLVM18_BIN}/clang++" CACHE STRING "AArch64 C++ compiler")
-    set(APPLE_AARCH64_CC  "${LLVM18_BIN}/clang"   CACHE STRING "AArch64 C compiler")
-    set(APPLE_AARCH64_LD  "${LLVM18_BIN}/ld.lld"  CACHE STRING "AArch64 ELF linker")
-    set(APPLE_AARCH64_AR  "${LLVM18_BIN}/llvm-ar"  CACHE STRING "AArch64 archive tool")
-    set(APPLE_AARCH64_LLC "${LLVM18_BIN}/llc"      CACHE STRING "LLVM LLC for AArch64")
-
-    set(APPLE_AARCH64_TRIPLE "aarch64-none-elf"
-        CACHE STRING "Clang target triple for bare-metal AArch64")
+    if(BARE_ARCH STREQUAL "aarch64")
+        set(BARE_TRIPLE    "aarch64-none-elf")
+        set(BARE_LLC_MARCH "aarch64")
+        set(BARE_ARCH_FLAGS "")
+        set(QEMU_NAME      "qemu-system-aarch64")
+        set(QEMU_MACHINE   -M virt -cpu cortex-a57 -device ramfb)
+    else()
+        set(BARE_TRIPLE    "x86_64-none-elf")
+        set(BARE_LLC_MARCH "x86-64")
+        # No red zone: exception handlers run on the interrupted stack.
+        set(BARE_ARCH_FLAGS -mno-red-zone)
+        set(QEMU_NAME      "qemu-system-x86_64")
+        set(QEMU_MACHINE   -vga std)
+    endif()
+    set(BARE_PLATFORM "${CMAKE_SOURCE_DIR}/runtime/platform/${BARE_ARCH}")
+    set(BARE_BOOT     "${CMAKE_SOURCE_DIR}/runtime/boot/${BARE_ARCH}")
 
     # -nostdinc++ prevents Homebrew clang from picking up macOS SDK libc++
     # headers (which require OS thread APIs) when targeting bare-metal ELF.
     # -DOBERON_BUILD_ON_APPLE switches compat_stdint.hpp to C-style headers.
-    set(APPLE_BARE_CXXFLAGS
-        --target=${APPLE_AARCH64_TRIPLE}
-        -std=c++20 -ffreestanding -nostdinc++ -O2
+    set(BARE_CXXFLAGS
+        --target=${BARE_TRIPLE}
+        -std=c++20 -ffreestanding -nostdinc++ -O2 ${BARE_ARCH_FLAGS}
         -Wall -Wextra -Wpedantic
         -DOBERON_BUILD_ON_APPLE
         -I${CMAKE_SOURCE_DIR}/runtime)
+    # Rewritten only when the target triple changes, so switching KERNEL_ARCH
+    # in an existing build tree rebuilds every object instead of reusing the
+    # other architecture's.
+    set(BARE_ARCH_STAMP "${CMAKE_BINARY_DIR}/bare_arch.stamp")
+    file(CONFIGURE OUTPUT "${BARE_ARCH_STAMP}" CONTENT "${BARE_TRIPLE}\n")
+    set(BARE_HEADERS
+        ${CMAKE_SOURCE_DIR}/runtime/compat_stdint.hpp
+        ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
+        ${BARE_ARCH_STAMP})
 
-    add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
-        COMMAND ${APPLE_AARCH64_CXX} ${APPLE_BARE_CXXFLAGS}
-                -c ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
-                -o ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/oberon_runtime_bare.cpp
-                ${CMAKE_SOURCE_DIR}/runtime/compat_stdint.hpp
-                ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
-        COMMENT "Compiling AArch64 bare runtime (Apple LLVM 18)")
+    # Runtime library objects: <name>.o from runtime/<path>
+    set(BARE_RUNTIME_OBJS "")
+    foreach(pair
+            "oberon_runtime_bare:runtime/oberon_runtime_bare.cpp"
+            "hal:runtime/platform/${BARE_ARCH}/hal.cpp"
+            "framebuffer:runtime/framebuffer.cpp"
+            "po_devices:runtime/po_devices.cpp")
+        string(REPLACE ":" ";" pair "${pair}")
+        list(GET pair 0 obj_name)
+        list(GET pair 1 src)
+        add_custom_command(
+            OUTPUT ${CMAKE_BINARY_DIR}/${obj_name}.o
+            COMMAND ${BARE_CXX} ${BARE_CXXFLAGS}
+                    -c ${CMAKE_SOURCE_DIR}/${src}
+                    -o ${CMAKE_BINARY_DIR}/${obj_name}.o
+            DEPENDS ${CMAKE_SOURCE_DIR}/${src} ${BARE_HEADERS}
+            COMMENT "Compiling ${src} (${BARE_TRIPLE})")
+        list(APPEND BARE_RUNTIME_OBJS ${CMAKE_BINARY_DIR}/${obj_name}.o)
+    endforeach()
 
-    add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/hal.o
-        COMMAND ${APPLE_AARCH64_CXX} ${APPLE_BARE_CXXFLAGS}
-                -c ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
-                -o ${CMAKE_BINARY_DIR}/hal.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/platform/aarch64/hal.cpp
-                ${CMAKE_SOURCE_DIR}/runtime/compat_stdint.hpp
-                ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
-        COMMENT "Compiling AArch64 HAL (Apple LLVM 18)")
-
-    # Project Oberon devices (RAM disk, keyboard) and the file-system image.
+    # Project Oberon file-system image for the RAM disk (po_devices.cpp).
     # Archive members are only linked when referenced, so the Hello-World
     # kernel does not pull in the disk image.
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -294,80 +336,71 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
         COMMENT "Building Project Oberon RAM-disk image")
 
     add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/po_devices.o
-        COMMAND ${APPLE_AARCH64_CXX} ${APPLE_BARE_CXXFLAGS}
-                -c ${CMAKE_SOURCE_DIR}/runtime/po_devices.cpp
-                -o ${CMAKE_BINARY_DIR}/po_devices.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/po_devices.cpp
-                ${CMAKE_SOURCE_DIR}/runtime/platform/hal.hpp
-        COMMENT "Compiling Project Oberon devices (Apple LLVM 18)")
-
-    add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/po_disk_image.o
-        COMMAND ${APPLE_AARCH64_CC} --target=${APPLE_AARCH64_TRIPLE}
+        COMMAND ${BARE_CC} --target=${BARE_TRIPLE}
                 "-DPO_DISK_IMAGE=\"${PO_DISK_IMAGE}\""
                 -c ${CMAKE_SOURCE_DIR}/runtime/po_disk_image.S
                 -o ${CMAKE_BINARY_DIR}/po_disk_image.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/po_disk_image.S ${PO_DISK_IMAGE}
+        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/po_disk_image.S ${PO_DISK_IMAGE} ${BARE_ARCH_STAMP}
         COMMENT "Embedding Project Oberon RAM-disk image"
         VERBATIM)
+    list(APPEND BARE_RUNTIME_OBJS ${CMAKE_BINARY_DIR}/po_disk_image.o)
 
+    set(BARE_RUNTIME_LIB ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a)
     add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
-        COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
-        COMMAND ${APPLE_AARCH64_AR} rcs
-                ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
-                ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
-                ${CMAKE_BINARY_DIR}/hal.o
-                ${CMAKE_BINARY_DIR}/po_devices.o
-                ${CMAKE_BINARY_DIR}/po_disk_image.o
-        DEPENDS ${CMAKE_BINARY_DIR}/oberon_runtime_bare.o
-                ${CMAKE_BINARY_DIR}/hal.o
-                ${CMAKE_BINARY_DIR}/po_devices.o
-                ${CMAKE_BINARY_DIR}/po_disk_image.o
-        COMMENT "Archiving AArch64 runtime library")
+        OUTPUT ${BARE_RUNTIME_LIB}
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${BARE_RUNTIME_LIB}
+        COMMAND ${BARE_AR} rcs ${BARE_RUNTIME_LIB} ${BARE_RUNTIME_OBJS}
+        DEPENDS ${BARE_RUNTIME_OBJS}
+        COMMENT "Archiving ${BARE_ARCH} runtime library")
 
     add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/boot.o
-        COMMAND ${APPLE_AARCH64_CC} --target=${APPLE_AARCH64_TRIPLE}
-                -ffreestanding
-                -c ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/boot.S
+        COMMAND ${BARE_CC} --target=${BARE_TRIPLE} -ffreestanding
+                -c ${BARE_BOOT}/boot.S
                 -o ${CMAKE_BINARY_DIR}/boot.o
-        DEPENDS ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/boot.S
-        COMMENT "Assembling AArch64 boot stub (Apple LLVM 18)")
+        DEPENDS ${BARE_BOOT}/boot.S ${BARE_ARCH_STAMP}
+        COMMENT "Assembling ${BARE_ARCH} boot stub")
+
+    # Boot stub + runtime archive only (used by build_kernel.sh).
+    add_custom_target(kernel_runtime
+        DEPENDS ${CMAKE_BINARY_DIR}/boot.o ${BARE_RUNTIME_LIB})
+
+    set(BARE_LLC_FLAGS --march=${BARE_LLC_MARCH} -mtriple=${BARE_TRIPLE} --filetype=obj)
+    set(BARE_LINK ${BARE_LD} -T ${BARE_BOOT}/kernel.ld ${CMAKE_BINARY_DIR}/boot.o)
 
     add_custom_target(kernel
-        COMMAND ${APPLE_AARCH64_LLC} --march=aarch64
-                -mtriple=${APPLE_AARCH64_TRIPLE} --filetype=obj
+        COMMAND ${BARE_LLC} ${BARE_LLC_FLAGS}
                 ${CMAKE_SOURCE_DIR}/tests/Hello.ll
                 -o ${CMAKE_BINARY_DIR}/hello.o
-        COMMAND ${APPLE_AARCH64_LD}
-                -T ${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/kernel.ld
-                ${CMAKE_BINARY_DIR}/boot.o
+        COMMAND ${BARE_LINK}
                 ${CMAKE_BINARY_DIR}/hello.o
-                ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
-                -o ${CMAKE_BINARY_DIR}/kernel_aarch64.elf
+                ${BARE_RUNTIME_LIB}
+                -o ${CMAKE_BINARY_DIR}/kernel_${BARE_ARCH}.elf
         DEPENDS generate_hello_ll
                 ${CMAKE_BINARY_DIR}/boot.o
-                ${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a
-        COMMENT "Linking AArch64 bare-metal kernel → kernel_aarch64.elf")
+                ${BARE_RUNTIME_LIB}
+        COMMENT "Linking ${BARE_ARCH} bare-metal kernel → kernel_${BARE_ARCH}.elf")
 
-    find_program(QEMU_AARCH64 qemu-system-aarch64)
-    if(QEMU_AARCH64)
+    # Cached per architecture, so switching KERNEL_ARCH picks the right QEMU.
+    find_program(QEMU_BIN_${BARE_ARCH} ${QEMU_NAME})
+    set(QEMU_BIN "${QEMU_BIN_${BARE_ARCH}}")
+    set(KERNEL_QEMU_DISPLAY "none" CACHE STRING
+        "QEMU -display backend for the run_* targets (none, cocoa, ...)")
+    if(QEMU_BIN)
         add_custom_target(run_kernel
-            COMMAND ${QEMU_AARCH64}
-                    -M virt -cpu cortex-a57
-                    -kernel ${CMAKE_BINARY_DIR}/kernel_aarch64.elf
+            COMMAND ${QEMU_BIN} ${QEMU_MACHINE}
+                    -kernel ${CMAKE_BINARY_DIR}/kernel_${BARE_ARCH}.elf
                     -serial stdio -display none -no-reboot
             DEPENDS kernel
-            COMMENT "Running AArch64 kernel under QEMU virt"
+            COMMENT "Running ${BARE_ARCH} kernel under QEMU"
             USES_TERMINAL)
         message(STATUS "QEMU found: run_kernel target available")
     else()
-        message(STATUS "QEMU not found: install qemu-system-aarch64 to use run_kernel")
+        message(STATUS "QEMU not found: install ${QEMU_NAME} to use run_kernel")
     endif()
 
-    # ---- Project Oberon: all 14 modules → bootable AArch64 kernel ----------
+    # ---- Project Oberon: all 14 modules → bootable kernel ------------------
     #
     # Compilation model:
     #   - Dependency modules (all except System) use --init-only, emitting
@@ -387,88 +420,58 @@ elseif(KERNEL_ARCH STREQUAL "apple-aarch64")
     set(PO_DIR   "${CMAKE_SOURCE_DIR}/project-oberon")
     set(PO_BUILD "${CMAKE_BINARY_DIR}/project-oberon")
     file(MAKE_DIRECTORY "${PO_BUILD}")
+    # Every module's IR depends on the interfaces of the modules it imports.
+    file(GLOB PO_SOURCES "${PO_DIR}/*.Mod")
 
     set(PO_DEPS
         Kernel Display Input FileDir Files Modules Fonts Viewers
         Texts Oberon MenuViewers TextFrames Edit)
 
     set(PO_OBJ_FILES "")
-    # Every module's IR depends on the interfaces of the modules it imports.
-    file(GLOB PO_SOURCES "${PO_DIR}/*.Mod")
-    set(PO_LLC_FLAGS --march=aarch64 -mtriple=${APPLE_AARCH64_TRIPLE} --filetype=obj)
-    set(KERNEL_QEMU_DISPLAY "none" CACHE STRING
-        "QEMU -display backend for run_project_oberon (none, cocoa, ...)")
-
-    foreach(mod IN LISTS PO_DEPS)
+    foreach(mod IN LISTS PO_DEPS ITEMS System)
         set(ll_out  "${PO_BUILD}/${mod}.ll")
         set(obj_out "${PO_BUILD}/${mod}.o")
+        if(mod STREQUAL "System")
+            set(mode_flags "")            # top level: emits oberon_main()
+        else()
+            set(mode_flags --init-only)
+        endif()
         add_custom_command(
             OUTPUT  "${ll_out}"
-            COMMAND $<TARGET_FILE:oberonc> --emit-llvm --init-only --int32
+            COMMAND $<TARGET_FILE:oberonc> --emit-llvm ${mode_flags} --int32
                     --module-path "${PO_DIR}"
                     -o "${ll_out}"
                     "${PO_DIR}/${mod}.Mod"
             DEPENDS oberonc ${PO_SOURCES}
-            COMMENT "PO: ${mod}.Mod (init-only) → ${mod}.ll"
+            COMMENT "PO: ${mod}.Mod → ${mod}.ll"
             VERBATIM)
         add_custom_command(
             OUTPUT  "${obj_out}"
-            COMMAND "${APPLE_AARCH64_LLC}" ${PO_LLC_FLAGS}
-                    "${ll_out}" -o "${obj_out}"
-            DEPENDS "${ll_out}"
+            COMMAND "${BARE_LLC}" ${BARE_LLC_FLAGS} "${ll_out}" -o "${obj_out}"
+            DEPENDS "${ll_out}" "${BARE_ARCH_STAMP}"
             COMMENT "PO: ${mod}.ll → ${mod}.o"
             VERBATIM)
         list(APPEND PO_OBJ_FILES "${obj_out}")
     endforeach()
 
-    # System.Mod: top-level module — emits oberon_main(), not Module_init()
-    set(PO_SYSTEM_LL  "${PO_BUILD}/System.ll")
-    set(PO_SYSTEM_OBJ "${PO_BUILD}/System.o")
-    add_custom_command(
-        OUTPUT  "${PO_SYSTEM_LL}"
-        COMMAND $<TARGET_FILE:oberonc> --emit-llvm --int32
-                --module-path "${PO_DIR}"
-                -o "${PO_SYSTEM_LL}"
-                "${PO_DIR}/System.Mod"
-        DEPENDS oberonc ${PO_SOURCES}
-        COMMENT "PO: System.Mod (top-level) → System.ll"
-        VERBATIM)
-    add_custom_command(
-        OUTPUT  "${PO_SYSTEM_OBJ}"
-        COMMAND "${APPLE_AARCH64_LLC}" ${PO_LLC_FLAGS}
-                "${PO_SYSTEM_LL}" -o "${PO_SYSTEM_OBJ}"
-        DEPENDS "${PO_SYSTEM_LL}"
-        COMMENT "PO: System.ll → System.o"
-        VERBATIM)
-    list(APPEND PO_OBJ_FILES "${PO_SYSTEM_OBJ}")
-
+    set(PO_KERNEL "${CMAKE_BINARY_DIR}/project_oberon_${BARE_ARCH}.elf")
     add_custom_target(project_oberon_kernel
-        COMMAND "${APPLE_AARCH64_LD}"
-                -T "${CMAKE_SOURCE_DIR}/runtime/boot/aarch64/kernel.ld"
-                "${CMAKE_BINARY_DIR}/boot.o"
-                ${PO_OBJ_FILES}
-                "${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a"
-                -o "${CMAKE_BINARY_DIR}/project_oberon_aarch64.elf"
-        DEPENDS
-                "${CMAKE_BINARY_DIR}/boot.o"
-                "${CMAKE_BINARY_DIR}/liboberon_runtime_bare.a"
-                ${PO_OBJ_FILES}
-        COMMENT "PO: linking Project Oberon kernel → project_oberon_aarch64.elf"
+        COMMAND ${BARE_LINK} ${PO_OBJ_FILES} "${BARE_RUNTIME_LIB}" -o "${PO_KERNEL}"
+        DEPENDS "${CMAKE_BINARY_DIR}/boot.o" "${BARE_RUNTIME_LIB}" ${PO_OBJ_FILES}
+        COMMENT "PO: linking Project Oberon kernel → project_oberon_${BARE_ARCH}.elf"
         VERBATIM)
 
-    if(QEMU_AARCH64)
+    if(QEMU_BIN)
         add_custom_target(run_project_oberon
-            COMMAND "${QEMU_AARCH64}"
-                    -M virt -cpu cortex-a57 -device ramfb
-                    -kernel "${CMAKE_BINARY_DIR}/project_oberon_aarch64.elf"
+            COMMAND "${QEMU_BIN}" ${QEMU_MACHINE}
+                    -kernel "${PO_KERNEL}"
                     -serial stdio -display ${KERNEL_QEMU_DISPLAY} -no-reboot
             DEPENDS project_oberon_kernel
-            COMMENT "Running Project Oberon kernel under QEMU virt"
+            COMMENT "Running Project Oberon kernel under QEMU"
             USES_TERMINAL)
         message(STATUS "run_project_oberon target available")
     endif()
-
 else()
     message(FATAL_ERROR
-        "Unknown KERNEL_ARCH '${KERNEL_ARCH}'. Valid values: x86_64, aarch64, apple-aarch64")
+        "Unknown KERNEL_ARCH '${KERNEL_ARCH}'. Valid values: x86_64, aarch64, apple-aarch64, apple-x86_64")
 endif()
