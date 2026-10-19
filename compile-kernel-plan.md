@@ -597,3 +597,54 @@ Fix options: put the stack below the page tables, separated by an unmapped 4 KiB
 ### Hand-written exception stubs (review item 10)
 
 `boot.S` lists 32 `ISR_NOERR`/`ISR_ERR` lines and an `isr_table` that repeats the same 32 labels, so they can drift apart. Generate both with assembler loops instead: `.irp` (or `.rept` + `.altmacro`) over vectors 0–31, choosing the error-code variant for vectors 8, 10–14, 17, 21, 29 and 30.
+
+---
+
+## Next work tracker — added 2026-10-18
+
+Planned work after the boot smoke tests (504191d), in the order we intend to do it. Update the status column as items move along.
+
+| # | Task | Status |
+|---|---|---|
+| 1 | Coverage-gap tests (compiler execution tests, runtime host tests, coverage build option) | 📋 TODO |
+| 2 | Mouse input (virtio-tablet) | 📋 TODO |
+| 3 | `Modules.Load` for statically linked modules | 📋 TODO |
+| 4 | Persistent file system / storage layer (see the backlog section above) | 📋 TODO |
+
+### 1. Coverage-gap tests — 📋 TODO
+
+Measured 2026-10-17 with `-fprofile-instr-generate` in a scratch tree: the compiler is at about 76% line coverage (parser 91%, `codegen.cpp` 77%, `codegen_gen.cpp` 71%, lexer 57%).
+
+- [ ] Execution tests in `tests/test_run.cpp` (`oberonc_codegen_tests`), in 64-bit mode where `ADR` is involved, since host addresses don't fit in 32 bits:
+  - [ ] `SYSTEM.GET`/`PUT`/`ADR`/`BIT`/`COPY`/`VAL` (0–14% covered)
+  - [ ] `REPEAT` (0%)
+  - [ ] integer `CASE` (59%)
+  - [ ] constant expressions / `evalConstInt` (9%)
+  - [ ] `ORD(pointer)` (the Bug 4 path)
+  - [ ] imported module interfaces / `loadModuleInterface` (53%)
+- [ ] Host unit tests for runtime code that no test reaches today:
+  - [ ] `runtime/po_devices.cpp`: serial → PS/2 key translation
+  - [ ] `runtime/framebuffer.cpp`: `fb_expand_xrgb` (y-flip, incremental update)
+  - [ ] `tools/mkpodisk.py`: directory page and file headers in the image
+- [ ] A `-DENABLE_COVERAGE=ON` CMake option. It must leave the hosted runtime uninstrumented, otherwise linking fails on `___llvm_profile_runtime`.
+
+### 2. Mouse input — 📋 TODO
+
+`HAL_Mouse` in `runtime/po_devices.cpp` always returns x=512, y=384, keys=0, so nothing on the desktop can be clicked.
+
+- [ ] AArch64: virtio-tablet over virtio-mmio on the QEMU `virt` machine
+- [ ] x86_64: virtio-tablet over PCI, or PS/2 aux
+- [ ] Keep the display flush throttle (currently driven from `HAL_Mouse`, every 40 ms)
+- [ ] Extend the smoke tests to cover pointer input
+
+### 3. `Modules.Load` for statically linked modules — 📋 TODO
+
+Clicking a command on the desktop currently reports a module load failure, because `Modules.Load` is disabled (Bug 10: everything is statically linked).
+
+- [ ] Generate a static table of modules and their exported commands at link time
+- [ ] Make `Modules.ThisMod`/`ThisCommand` resolve names from that table
+- [ ] Smoke test: run a command (e.g. `System.Directory`) and check the result
+
+### 4. Persistent file system — 📋 TODO
+
+Tracked in the "Design a persistent file system / storage layer" backlog section above. The RAM disk built by `mkpodisk.py` is the accepted interim solution.
