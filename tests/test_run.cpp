@@ -321,3 +321,132 @@ END T.)";
     for (bool w : {false, true})
         CHECK(run(src, w) == "done\n");
 }
+
+TEST_CASE("Run: SYSTEM.PUT/GET/BIT/COPY access memory through ADR addresses", "[run][system]") {
+    // Default mode only: ADR yields a host address (see the top of the file).
+    const char* src = R"(MODULE T; IMPORT Out, SYSTEM;
+VAR x, y, i: INTEGER; ch: CHAR; t: BOOLEAN; a, d: ARRAY 4 OF INTEGER;
+BEGIN x := 0; SYSTEM.PUT(SYSTEM.ADR(x), 1234); SYSTEM.GET(SYSTEM.ADR(x), y); Out.Int(y, 0);
+  SYSTEM.PUT(SYSTEM.ADR(ch), "Q"); Out.Char(" "); Out.Char(ch);
+  x := -1; t := FALSE; SYSTEM.PUT(SYSTEM.ADR(x), t); Out.Int(x, 5);
+  x := 5; Out.Int(ORD(SYSTEM.BIT(SYSTEM.ADR(x), 0)), 2);
+  Out.Int(ORD(SYSTEM.BIT(SYSTEM.ADR(x), 1)), 2); Out.Int(ORD(SYSTEM.BIT(SYSTEM.ADR(x), 2)), 2);
+  FOR i := 0 TO 3 DO a[i] := (i + 1) * 10; d[i] := 0 END;
+  SYSTEM.COPY(SYSTEM.ADR(a), SYSTEM.ADR(d), 3);
+  Out.Int(d[0] + d[1] + d[2], 3); Out.Int(d[3], 2); Out.Ln
+END T.)";
+    // PUT of a BOOLEAN stores one byte (little-endian hosts): -1 becomes -256.
+    CHECK(run(src, false) == "1234 Q -256 1 0 1 60 0\n");
+}
+
+TEST_CASE("Run: SYSTEM.ADR of a procedure and of a $hex$ byte string", "[run][system]") {
+    const char* src = R"(MODULE T; IMPORT Out, SYSTEM;
+TYPE Proc = PROCEDURE;
+VAR p: Proc; a: INTEGER; c: CHAR;
+PROCEDURE Hi; BEGIN Out.String("hi") END Hi;
+BEGIN p := SYSTEM.VAL(Proc, SYSTEM.ADR(Hi)); p;
+  a := SYSTEM.ADR($4F4B00$); Out.Char(" ");
+  SYSTEM.GET(a, c); WHILE c # 0X DO Out.Char(c); INC(a); SYSTEM.GET(a, c) END; Out.Ln
+END T.)";
+    CHECK(run(src, false) == "hi OK\n");
+}
+
+TEST_CASE("Run: SYSTEM.SIZE, SYSTEM.VAL bit patterns and SYSTEM.UML", "[run][system]") {
+    const char* src = R"(MODULE T; IMPORT Out, SYSTEM;
+TYPE R = RECORD a: INTEGER; c: CHAR END; S = RECORD c: CHAR; a: INTEGER END;
+VAR x: REAL; i: INTEGER;
+BEGIN Out.Int(SYSTEM.SIZE(CHAR), 0); Out.Int(SYSTEM.SIZE(INTEGER), 2);
+  Out.Int(SYSTEM.SIZE(R), 3); Out.Int(SYSTEM.SIZE(S), 3);
+  x := 1.0; i := SYSTEM.VAL(INTEGER, x); Out.Int(i, 20);
+  x := SYSTEM.VAL(REAL, i); Out.Int(FLOOR(x * 4.0), 2);
+  Out.Int(SYSTEM.UML(10000H, 30000H), 2); Out.Ln
+END T.)";
+    // Record sizes include the target's alignment padding (NEW allocates
+    // SIZE bytes, so they must match the layout the code is emitted with).
+    CHECK(run(src, false) == "1 8 16 16 4607182418800017408 4 3\n");
+    CHECK(run(src, true)  == "1 4  8  8          1065353216 4 3\n");
+}
+
+TEST_CASE("Run: REPEAT runs its body at least once; WHILE with ELSIF", "[run]") {
+    const char* src = R"(MODULE T; IMPORT Out;
+VAR i, n: INTEGER;
+BEGIN i := 0; REPEAT INC(i) UNTIL i >= 5; Out.Int(i, 0);
+  n := 0; REPEAT INC(n) UNTIL TRUE; Out.Int(n, 2);
+  i := 0; n := 0;
+  REPEAT INC(i); IF ODD(i) THEN INC(n) END UNTIL (i = 9) OR (n > 10); Out.Int(n, 2);
+  i := 0; n := 0;
+  WHILE i < 3 DO INC(i) ELSIF n < 2 DO INC(n) END; Out.Int(i * 10 + n, 3); Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "5 1 5 32\n");
+}
+
+TEST_CASE("Run: integer and CHAR CASE with label lists, ranges and constants", "[run]") {
+    // Oberon-07 labels are integers, strings or qualidents, so negative
+    // labels must be named constants.
+    const char* src = R"(MODULE T; IMPORT Out;
+CONST Max = 100; M3 = -3; M1 = -1;
+VAR i: INTEGER;
+PROCEDURE Kind(i: INTEGER): INTEGER;
+  VAR k: INTEGER;
+BEGIN
+  CASE i OF
+    0: k := 0
+  | 1, 3, 5: k := 1
+  | 6 .. 9, 20: k := 2
+  | M3 .. M1: k := 3
+  | Max: k := 4
+  END;
+  RETURN k
+END Kind;
+PROCEDURE Class(c: CHAR): INTEGER;
+  VAR k: INTEGER;
+BEGIN
+  CASE c OF
+    "a" .. "z": k := 1
+  | "A" .. "Z": k := 2
+  | "0" .. "9", "_": k := 3
+  | 0X: k := 4
+  END;
+  RETURN k
+END Class;
+BEGIN
+  Out.Int(Kind(0), 0); Out.Int(Kind(3), 2); Out.Int(Kind(6), 2); Out.Int(Kind(9), 2);
+  Out.Int(Kind(20), 2); Out.Int(Kind(-3), 2); Out.Int(Kind(-1), 2); Out.Int(Kind(Max), 2);
+  Out.Int(Class("q"), 2); Out.Int(Class("Q"), 2); Out.Int(Class("7"), 2);
+  Out.Int(Class("_"), 2); Out.Int(Class(0X), 2); Out.Ln
+END T.)";
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "0 1 2 2 2 3 3 4 1 2 3 3 4\n");
+}
+
+TEST_CASE("Run: constant expressions in CONST declarations and array lengths", "[run]") {
+    const char* src = R"(MODULE T; IMPORT Out;
+CONST A = 10; B = A * 3 + 2; C = (-7) DIV 2; D = (-7) MOD 2; E = B - A DIV 3;
+  F = -7 DIV 2; G = 7 MOD (-2);
+  N = (A + 2) DIV 4; H = 0FFH; Neg = -H;
+VAR arr: ARRAY N * 2 OF INTEGER; m: ARRAY A, N OF CHAR;
+BEGIN Out.Int(B, 0); Out.Int(C, 3); Out.Int(D, 2); Out.Int(E, 3);
+  Out.Int(LEN(arr), 2); Out.Int(LEN(m), 3); Out.Int(LEN(m[0]), 2);
+  Out.Int(H, 4); Out.Int(Neg, 5); Out.Int(F, 3); Out.Int(G, 3); Out.Ln
+END T.)";
+    // DIV and MOD fold with floor division, as at run time; a leading minus
+    // applies to the whole term, so F = -(7 DIV 2).
+    for (bool w : {false, true})
+        CHECK(run(src, w) == "32 -4 1 29 6 10 3 255 -255 -3 -1\n");
+}
+
+TEST_CASE("Run: ORD of a pointer is its address", "[run]") {
+    // Default mode only (see the top of the file). The Bug 4 path: ORD(ptr)
+    // passed where an INTEGER is expected.
+    const char* src = R"(MODULE T; IMPORT Out, SYSTEM;
+TYPE P = POINTER TO R; R = RECORD x: INTEGER END;
+VAR p, q: P;
+PROCEDURE Show(a: INTEGER); BEGIN IF a # 0 THEN Out.String("addr") END END Show;
+BEGIN NEW(p); q := p; Show(ORD(p));
+  IF ORD(p) = ORD(q) THEN Out.String(" same") END;
+  IF ORD(p) = SYSTEM.ADR(p.x) - 0 THEN Out.String(" field0") END;
+  p := NIL; Out.Int(ORD(p), 2); Out.Ln
+END T.)";
+    CHECK(run(src, false) == "addr same field0 0\n");
+}

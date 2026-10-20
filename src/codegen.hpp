@@ -8,6 +8,7 @@
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Function.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
 
 #include <set>
 #include <span>
@@ -56,6 +57,10 @@ private:
     std::unique_ptr<llvm::Module>    llvmMod_;
     std::unique_ptr<llvm::IRBuilder<>> b_;
     std::string                      modName_;
+    // Host target. Created up front so llvmMod_ has the real data layout
+    // while code is generated: SIZE, NEW and record copies take type sizes
+    // from it, and must agree with the layout the object is emitted with.
+    std::unique_ptr<llvm::TargetMachine> tm_;
 
     // ---- Semantic state ----
     std::set<std::string>                   importedModules_;

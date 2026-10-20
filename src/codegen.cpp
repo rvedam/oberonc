@@ -34,7 +34,26 @@ CodeGen::CodeGen(const std::string& moduleName)
     : llvmMod_(std::make_unique<llvm::Module>(moduleName, ctx_))
     , b_(std::make_unique<llvm::IRBuilder<>>(ctx_))
     , modName_(moduleName)
-{}
+{
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+
+    std::string targetTriple = llvm::sys::getDefaultTargetTriple();
+    std::string err;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(targetTriple, err);
+    if (!target)
+        throw std::runtime_error("LLVM target lookup failed: " + err);
+
+    llvm::TargetOptions opt;
+#if __has_include(<llvm/TargetParser/Host.h>)  // LLVM 17+
+    auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+#else  // LLVM 14
+    auto rm = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
+#endif
+    tm_.reset(target->createTargetMachine(targetTriple, "generic", "", opt, rm));
+    llvmMod_->setTargetTriple(targetTriple);
+    llvmMod_->setDataLayout(tm_->createDataLayout());
+}
 
 void CodeGen::writeIR(const std::string& path) {
     std::error_code ec;
@@ -62,36 +81,15 @@ void CodeGen::writeObject(const std::string& path) {
             throw std::runtime_error("LLVM module verification failed:\n" + err);
         }
     }
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-
-    std::string targetTriple = llvm::sys::getDefaultTargetTriple();
-    llvmMod_->setTargetTriple(targetTriple);
-
-    std::string err;
-    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(targetTriple, err);
-    if (!target)
-        throw std::runtime_error("LLVM target lookup failed: " + err);
-
-    llvm::TargetOptions opt;
-#if __has_include(<llvm/TargetParser/Host.h>)  // LLVM 17+
-    auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
-#else  // LLVM 14
-    auto rm = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
-#endif
-    auto tm = std::unique_ptr<llvm::TargetMachine>(
-        target->createTargetMachine(targetTriple, "generic", "", opt, rm));
-    llvmMod_->setDataLayout(tm->createDataLayout());
-
     std::error_code ec;
     llvm::raw_fd_ostream dest(path, ec, llvm::sys::fs::OF_None);
     if (ec) throw std::runtime_error("cannot open object output: " + ec.message());
 
     llvm::legacy::PassManager pm;
 #if __has_include(<llvm/TargetParser/Host.h>)  // LLVM 17+
-    if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile))
+    if (tm_->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile))
 #else  // LLVM 14
-    if (tm->addPassesToEmitFile(pm, dest, nullptr, llvm::CGFT_ObjectFile))
+    if (tm_->addPassesToEmitFile(pm, dest, nullptr, llvm::CGFT_ObjectFile))
 #endif
         throw std::runtime_error("LLVM cannot emit object file for this target");
 
@@ -1249,8 +1247,14 @@ int64_t CodeGen::evalConstInt(const Expr& e) {
             case BinaryOp::Add:  return lv + rv;
             case BinaryOp::Sub:  return lv - rv;
             case BinaryOp::Mul:  return lv * rv;
-            case BinaryOp::IDiv: return lv / rv;
-            case BinaryOp::IMod: return lv % rv;
+            case BinaryOp::IDiv:
+            case BinaryOp::IMod: {
+                // Floor division, as at run time: -7 DIV 2 = -4, -7 MOD 2 = 1.
+                if (rv == 0) error("constant division by zero");
+                int64_t q = lv / rv, r = lv % rv;
+                if (r != 0 && ((r < 0) != (rv < 0))) { --q; r += rv; }
+                return be->op == BinaryOp::IDiv ? q : r;
+            }
             default: break;
         }
     }
