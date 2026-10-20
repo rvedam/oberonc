@@ -606,22 +606,27 @@ Planned work after the boot smoke tests (504191d), in the order we intend to do 
 
 | # | Task | Status |
 |---|---|---|
-| 1 | Coverage-gap tests (compiler execution tests, runtime host tests, coverage build option) | 📋 TODO |
+| 1 | Coverage-gap tests (compiler execution tests, runtime host tests, coverage build option) | 🚧 IN PROGRESS |
 | 2 | Mouse input (virtio-tablet) | 📋 TODO |
 | 3 | `Modules.Load` for statically linked modules | 📋 TODO |
 | 4 | Persistent file system / storage layer (see the backlog section above) | 📋 TODO |
+| 5 | Coverage report tool: one command that builds instrumented, runs every test and writes a report (follow-up to 1) | 📋 TODO |
 
-### 1. Coverage-gap tests — 📋 TODO
+### 1. Coverage-gap tests — 🚧 IN PROGRESS
 
 Measured 2026-10-17 with `-fprofile-instr-generate` in a scratch tree: the compiler is at about 76% line coverage (parser 91%, `codegen.cpp` 77%, `codegen_gen.cpp` 71%, lexer 57%).
 
 - [ ] Execution tests in `tests/test_run.cpp` (`oberonc_codegen_tests`), in 64-bit mode where `ADR` is involved, since host addresses don't fit in 32 bits:
-  - [ ] `SYSTEM.GET`/`PUT`/`ADR`/`BIT`/`COPY`/`VAL` (0–14% covered)
-  - [ ] `REPEAT` (0%)
-  - [ ] integer `CASE` (59%)
-  - [ ] constant expressions / `evalConstInt` (9%)
-  - [ ] `ORD(pointer)` (the Bug 4 path)
+  - [x] `SYSTEM.GET`/`PUT`/`ADR`/`BIT`/`COPY`/`VAL` (0–14% covered)
+  - [x] `REPEAT` (0%)
+  - [x] integer `CASE` (59%)
+  - [x] constant expressions / `evalConstInt` (9%)
+  - [x] `ORD(pointer)` (the Bug 4 path)
   - [ ] imported module interfaces / `loadModuleInterface` (53%)
+Bugs the new tests found (fixed 2026-10-18):
+- `SYSTEM.SIZE`, `NEW` and record copies took type sizes from LLVM's default data layout, because the target layout was only set in `writeObject`. There, `INTEGER` (i64) is 4-byte aligned, so `RECORD c: CHAR; a: INTEGER END` was sized 12 bytes but emitted as 16, and `NEW` under-allocated it. `CodeGen` now creates the target machine and sets the data layout in its constructor.
+- `evalConstInt` folded `DIV`/`MOD` with C++ truncation (`(-7) DIV 2` gave -3, not -4) and divided by zero in the compiler. It now uses floor division, as the generated code does, and reports a constant division by zero.
+
 - [ ] Host unit tests for runtime code that no test reaches today:
   - [ ] `runtime/po_devices.cpp`: serial → PS/2 key translation
   - [ ] `runtime/framebuffer.cpp`: `fb_expand_xrgb` (y-flip, incremental update)
@@ -648,3 +653,8 @@ Clicking a command on the desktop currently reports a module load failure, becau
 ### 4. Persistent file system — 📋 TODO
 
 Tracked in the "Design a persistent file system / storage layer" backlog section above. The RAM disk built by `mkpodisk.py` is the accepted interim solution.
+
+### 5. Coverage report tool — 📋 TODO (follow-up to 1)
+
+- [ ] One command (a script or a CMake target) that configures an instrumented build tree with `-DENABLE_COVERAGE=ON`, runs all unit tests (and optionally the smoke tests), merges the profiles with `llvm-profdata` and writes a report with `llvm-cov` (a text summary per file plus HTML)
+- [ ] Document it in CLAUDE.md
